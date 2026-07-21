@@ -66,6 +66,7 @@
     <div class="row">
       <button id="locate">📍 Near me</button>
       <button id="stop" disabled>Stop</button>
+      <button id="reset">Reset</button>
     </div>
   </div>
   <div class="status" id="status">Move/zoom the map, then “Load zones in this view”.</div>
@@ -99,7 +100,8 @@ L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r
 
 const zoneLayer = L.layerGroup().addTo(map);
 let markers = [];                 // { marker, owner }
-const zonesById = new Map();      // accumulated across tiles of the current load
+const zonesById = new Map();      // accumulates across loads; deduped by zone id
+const coveredTiles = new Set();   // grid-tile keys already fetched — skipped on reload
 const selected = new Set();       // owners ticked to show; empty = show all
 let loadToken = 0;                // incrementing cancels an in-flight load
 
@@ -135,19 +137,21 @@ function setBusy(b) {
 }
 
 // ---- tiling -------------------------------------------------------------
-function tileBounds(b) {
-  const latSpan = b.getNorth() - b.getSouth(), lngSpan = b.getEast() - b.getWest();
-  let rows = Math.max(1, Math.ceil(latSpan / MAX_LAT));
-  let cols = Math.max(1, Math.ceil(lngSpan / MAX_LNG));
-  while (rows * cols > MAX_TILES) { if (rows >= cols) rows--; else cols--; } // grow tile size to stay under the cap
-  const dLat = latSpan / rows, dLng = lngSpan / cols, tiles = [];
-  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
-    tiles.push({
-      s: b.getSouth() + r * dLat, n: b.getSouth() + (r + 1) * dLat,
-      w: b.getWest() + c * dLng, e: b.getWest() + (c + 1) * dLng
-    });
+// Snap tiles to a fixed global grid (multiples of MAX_LAT/MAX_LNG) so a given
+// geographic tile always has the same key across loads — lets us skip tiles
+// already fetched. Edge tiles may extend slightly past the view; that's fine.
+function gridTilesInView(b) {
+  const iS = Math.floor(b.getSouth() / MAX_LAT), iN = Math.floor(b.getNorth() / MAX_LAT);
+  const jW = Math.floor(b.getWest() / MAX_LNG), jE = Math.floor(b.getEast() / MAX_LNG);
+  const tiles = [];
+  for (let i = iS; i <= iN; i++) for (let j = jW; j <= jE; j++) {
+    tiles.push({ key: i + "_" + j, s: i * MAX_LAT, n: (i + 1) * MAX_LAT, w: j * MAX_LNG, e: (j + 1) * MAX_LNG });
   }
   return tiles;
+}
+function tileDistToCenter(t, c) {
+  const dy = (t.s + t.n) / 2 - c.lat, dx = (t.w + t.e) / 2 - c.lng;
+  return dy * dy + dx * dx;
 }
 
 async function fetchTile(t, token, attempt = 0) {
@@ -165,15 +169,20 @@ async function fetchTile(t, token, attempt = 0) {
 
 async function loadZones() {
   const token = ++loadToken;
-  const tiles = tileBounds(map.getBounds());
-  zonesById.clear();
+  const b = map.getBounds(), center = b.getCenter();
+  let tiles = gridTilesInView(b).filter(t => !coveredTiles.has(t.key)); // skip already-loaded tiles
+  tiles.sort((a, z) => tileDistToCenter(a, center) - tileDistToCenter(z, center)); // nearest first
+  if (!tiles.length) { setStatus(`Nothing new — this view is already loaded · ${zonesById.size} zones total.`); return; }
+  const remaining = Math.max(0, tiles.length - MAX_TILES);
+  if (remaining) tiles = tiles.slice(0, MAX_TILES);
+
   setBusy(true);
   try {
     for (let i = 0; i < tiles.length; i++) {
       if (token !== loadToken) return;
-      setStatus(`Loading tile ${i + 1}/${tiles.length}… (${zonesById.size} zones so far)`);
+      setStatus(`Loading new tile ${i + 1}/${tiles.length}… (${zonesById.size} zones total)`);
       let zones;
-      try { zones = await fetchTile(tiles[i], token); }
+      try { zones = await fetchTile(tiles[i], token); coveredTiles.add(tiles[i].key); }
       catch (e) { setStatus(`Tile ${i + 1}/${tiles.length} failed: ${e.message}. Continuing…`); zones = []; }
       if (token !== loadToken) return;
       for (const z of zones) zonesById.set(z.id, z);
@@ -182,7 +191,8 @@ async function loadZones() {
     }
     if (token === loadToken) {
       const owners = new Set([...zonesById.values()].map(ownerOf)).size;
-      setStatus(`Done · ${zonesById.size} zones · ${owners} owners across ${tiles.length} tile(s).`);
+      setStatus(`Done · ${zonesById.size} zones · ${owners} owners` +
+        (remaining ? ` · ${remaining} more tile(s) in view — Load again to fetch them.` : "."));
     }
   } finally {
     if (token === loadToken) setBusy(false);
@@ -262,6 +272,10 @@ function applyFilter() {
 // ---- events -------------------------------------------------------------
 document.getElementById("load").onclick = loadZones;
 document.getElementById("stop").onclick = () => { loadToken++; setBusy(false); setStatus(`Stopped · ${zonesById.size} zones loaded.`); };
+document.getElementById("reset").onclick = () => {
+  loadToken++; zonesById.clear(); coveredTiles.clear(); selected.clear();
+  render(); setBusy(false); setStatus("Cleared. Load zones in this view to start again.");
+};
 document.getElementById("search").addEventListener("input", buildLegend);
 document.getElementById("all").onclick = () => { for (const { owner } of markers) selected.add(owner); buildLegend(); applyFilter(); };
 document.getElementById("none").onclick = () => { selected.clear(); buildLegend(); applyFilter(); };
