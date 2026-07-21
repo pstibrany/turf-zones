@@ -9,13 +9,15 @@ browser and the API allows cross-origin requests.
 
 Open `index.html` in a browser, or host it (see below). Then:
 
-- **Load zones in this view** — fetches every zone inside the current map bounds.
+- **Load zones in this view** — splits the current map bounds into a grid and
+  fetches each tile in turn, merging and de-duping by zone id. Requests are
+  spaced ≥1s apart (the API allows 1 request/second) and 429s are retried with
+  backoff, so large areas load without hitting the rate limit. **Stop** cancels.
 - **📍 Near me** — jumps to your location and loads nearby zones.
-- Click an owner in the sidebar (or type in the search box) to highlight only
-  that player's / clan's zones and dim the rest.
+- **Tick owners** in the sidebar to show only those players/clans (multi-select,
+  including `(neutral)`); untick all to show everything. **All / None** and the
+  filter box help wrangle long lists.
 - Click a zone for owner, points, total takeovers, and when it was last taken.
-
-Zoom in for a smaller, faster area — very large boxes return a lot of data.
 
 ## Host on GitHub Pages
 

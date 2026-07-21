@@ -12,7 +12,7 @@
 
   .panel {
     position: absolute; top: 10px; left: 10px; z-index: 1000;
-    width: 300px; max-height: calc(100% - 20px); display: flex; flex-direction: column;
+    width: 310px; max-height: calc(100% - 20px); display: flex; flex-direction: column;
     background: rgba(255,255,255,0.95); border-radius: 12px;
     box-shadow: 0 4px 20px rgba(0,0,0,0.25); overflow: hidden;
   }
@@ -29,15 +29,19 @@
   button { cursor: pointer; flex: 1; }
   button.primary { background: #007aff; color: #fff; border-color: #007aff; font-weight: 600; }
   button:active { transform: translateY(1px); }
+  button:disabled { opacity: 0.5; cursor: default; }
   input { flex: 1; }
-  .status { padding: 0 14px 8px; font-size: 11px; opacity: 0.7; min-height: 14px; }
-  .legend { overflow-y: auto; padding: 0 6px 8px; border-top: 1px solid rgba(128,128,128,0.2); }
-  .legend-title { padding: 8px 8px 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; opacity: 0.55; }
+  .status { padding: 0 14px 8px; font-size: 11px; opacity: 0.75; min-height: 14px; }
+  .filterbar { padding: 4px 14px 8px; display: flex; gap: 6px; align-items: center; border-top: 1px solid rgba(128,128,128,0.2); }
+  .filterbar input { padding: 5px 8px; }
+  .filterbar button { flex: 0 0 auto; padding: 5px 8px; }
+  .legend { overflow-y: auto; padding: 0 6px 8px; }
+  .legend-title { padding: 6px 8px 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; opacity: 0.55; }
   .owner {
-    display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 7px; cursor: pointer;
+    display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: 7px; cursor: pointer;
   }
   .owner:hover { background: rgba(128,128,128,0.15); }
-  .owner.active { background: rgba(0,122,255,0.18); }
+  .owner input { flex: 0 0 auto; margin: 0; accent-color: #007aff; }
   .swatch { width: 13px; height: 13px; border-radius: 50%; flex: 0 0 auto; border: 1px solid rgba(0,0,0,0.25); }
   .owner .name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .owner .count { opacity: 0.6; font-variant-numeric: tabular-nums; }
@@ -61,13 +65,17 @@
     <button id="load" class="primary">Load zones in this view</button>
     <div class="row">
       <button id="locate">📍 Near me</button>
-      <button id="clearHi" title="Clear owner highlight">Clear</button>
+      <button id="stop" disabled>Stop</button>
     </div>
-    <input id="search" type="search" placeholder="Highlight a player / clan…" />
   </div>
   <div class="status" id="status">Move/zoom the map, then “Load zones in this view”.</div>
+  <div class="filterbar">
+    <input id="search" type="search" placeholder="Filter owners…" />
+    <button id="all">All</button>
+    <button id="none">None</button>
+  </div>
   <div class="legend">
-    <div class="legend-title">Owners in view (by zone count)</div>
+    <div class="legend-title" id="legend-title">Owners in view — tick to show only those</div>
     <div id="legend"></div>
   </div>
 </div>
@@ -75,51 +83,115 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 const API = "https://api.turfgame.com/v5/zones";
-const CPH = [55.6761, 12.5683];               // Copenhagen
-const SJAELLAND = [[54.9, 11.0], [56.2, 12.75]]; // fallback bounds
+const CPH = [55.6761, 12.5683];
+const NEUTRAL = "(neutral)";
+
+// per-tile max span (degrees). A Copenhagen box ~0.15×0.20 returns ~950 zones fine.
+const MAX_LAT = 0.12, MAX_LNG = 0.18;
+const MAX_TILES = 60;          // safety cap on a single load
+const REQ_SPACING_MS = 1100;   // honour the API's 1 req/sec limit
+const RETRY_BACKOFF_MS = 1500;
 
 const map = L.map("map", { zoomControl: true }).setView(CPH, 13);
 L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
-  attribution: '© OpenStreetMap © CARTO · zones © Turf',
-  maxZoom: 20, subdomains: "abcd"
+  attribution: '© OpenStreetMap © CARTO · zones © Turf', maxZoom: 20, subdomains: "abcd"
 }).addTo(map);
 
 const zoneLayer = L.layerGroup().addTo(map);
-let markers = [];          // { marker, owner, zone }
-let highlighted = null;    // owner name currently highlighted
+let markers = [];                 // { marker, owner }
+const zonesById = new Map();      // accumulated across tiles of the current load
+const selected = new Set();       // owners ticked to show; empty = show all
+let loadToken = 0;                // incrementing cancels an in-flight load
 
 // ---- deterministic color per owner --------------------------------------
 const colorCache = new Map();
 function colorForOwner(name) {
+  if (name === NEUTRAL) return "#9aa0a6";
   if (colorCache.has(name)) return colorCache.get(name);
   let h = 0;
   for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
-  const hue = h % 360;
-  const sat = 62 + (h >> 9) % 25;   // 62–86%
-  const lit = 42 + (h >> 4) % 12;   // 42–53%
-  const c = `hsl(${hue} ${sat}% ${lit}%)`;
+  const c = `hsl(${h % 360} ${62 + (h >> 9) % 25}% ${42 + (h >> 4) % 12}%)`;
   colorCache.set(name, c);
   return c;
 }
 
 // ---- helpers ------------------------------------------------------------
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+function ownerOf(z) { return z.currentOwner ? z.currentOwner.name : NEUTRAL; }
 function ago(iso) {
   if (!iso) return "—";
-  const then = new Date(iso.replace("+0000", "Z")).getTime();
-  const s = Math.max(0, (Date.now() - then) / 1000);
-  const d = s / 86400, h = s / 3600, m = s / 60;
-  if (d >= 2) return Math.floor(d) + " days ago";
-  if (h >= 2) return Math.floor(h) + " h ago";
-  if (m >= 2) return Math.floor(m) + " min ago";
+  const s = Math.max(0, (Date.now() - new Date(iso.replace("+0000", "Z")).getTime()) / 1000);
+  if (s / 86400 >= 2) return Math.floor(s / 86400) + " days ago";
+  if (s / 3600 >= 2) return Math.floor(s / 3600) + " h ago";
+  if (s / 60 >= 2) return Math.floor(s / 60) + " min ago";
   return "just now";
 }
 function esc(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function setStatus(m) { document.getElementById("status").textContent = m; }
+function setBusy(b) {
+  document.getElementById("load").disabled = b;
+  document.getElementById("locate").disabled = b;
+  document.getElementById("stop").disabled = !b;
+}
 
-function setStatus(msg) { document.getElementById("status").textContent = msg; }
+// ---- tiling -------------------------------------------------------------
+function tileBounds(b) {
+  const latSpan = b.getNorth() - b.getSouth(), lngSpan = b.getEast() - b.getWest();
+  let rows = Math.max(1, Math.ceil(latSpan / MAX_LAT));
+  let cols = Math.max(1, Math.ceil(lngSpan / MAX_LNG));
+  while (rows * cols > MAX_TILES) { if (rows >= cols) rows--; else cols--; } // grow tile size to stay under the cap
+  const dLat = latSpan / rows, dLng = lngSpan / cols, tiles = [];
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    tiles.push({
+      s: b.getSouth() + r * dLat, n: b.getSouth() + (r + 1) * dLat,
+      w: b.getWest() + c * dLng, e: b.getWest() + (c + 1) * dLng
+    });
+  }
+  return tiles;
+}
+
+async function fetchTile(t, token, attempt = 0) {
+  const body = [{ northEast: { latitude: t.n, longitude: t.e }, southWest: { latitude: t.s, longitude: t.w } }];
+  const res = await fetch(API, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (token !== loadToken) return [];
+  if (res.status === 429) {
+    if (attempt >= 5) throw new Error("rate limited");
+    await sleep(RETRY_BACKOFF_MS * (attempt + 1));
+    return fetchTile(t, token, attempt + 1);
+  }
+  if (!res.ok) throw new Error("HTTP " + res.status);
+  return res.json();
+}
+
+async function loadZones() {
+  const token = ++loadToken;
+  const tiles = tileBounds(map.getBounds());
+  zonesById.clear();
+  setBusy(true);
+  try {
+    for (let i = 0; i < tiles.length; i++) {
+      if (token !== loadToken) return;
+      setStatus(`Loading tile ${i + 1}/${tiles.length}… (${zonesById.size} zones so far)`);
+      let zones;
+      try { zones = await fetchTile(tiles[i], token); }
+      catch (e) { setStatus(`Tile ${i + 1}/${tiles.length} failed: ${e.message}. Continuing…`); zones = []; }
+      if (token !== loadToken) return;
+      for (const z of zones) zonesById.set(z.id, z);
+      render();
+      if (i < tiles.length - 1) await sleep(REQ_SPACING_MS);
+    }
+    if (token === loadToken) {
+      const owners = new Set([...zonesById.values()].map(ownerOf)).size;
+      setStatus(`Done · ${zonesById.size} zones · ${owners} owners across ${tiles.length} tile(s).`);
+    }
+  } finally {
+    if (token === loadToken) setBusy(false);
+  }
+}
 
 // ---- rendering ----------------------------------------------------------
 function popupHtml(z) {
-  const owner = z.currentOwner ? z.currentOwner.name : "(neutral)";
+  const owner = ownerOf(z);
   const region = z.region ? `${z.region.name || ""}${z.region.country ? ", " + z.region.country.toUpperCase() : ""}` : "";
   return `
     <div class="pop-name">${esc(z.name)}</div>
@@ -134,89 +206,65 @@ function popupHtml(z) {
     <div style="margin-top:6px"><a href="https://turfgame.com/zone/${encodeURIComponent(z.name)}" target="_blank">Open on turfgame.com ↗</a></div>`;
 }
 
-function render(zones) {
+function render() {
   zoneLayer.clearLayers();
   markers = [];
-  const counts = new Map();
-
-  for (const z of zones) {
-    const owner = z.currentOwner ? z.currentOwner.name : "(neutral)";
-    counts.set(owner, (counts.get(owner) || 0) + 1);
-    const color = colorForOwner(owner);
-    const m = L.circleMarker([z.latitude, z.longitude], {
-      radius: 6, weight: 1.5, color: "#fff", fillColor: color, fillOpacity: 0.9
-    });
+  for (const z of zonesById.values()) {
+    const owner = ownerOf(z), color = colorForOwner(owner);
+    const m = L.circleMarker([z.latitude, z.longitude], { radius: 6, weight: 1.5, color: "#fff", fillColor: color, fillOpacity: 0.9 });
     m.bindPopup(() => popupHtml(z), { maxWidth: 260 });
     m.bindTooltip(`${z.name} — ${owner}`, { direction: "top" });
     m.addTo(zoneLayer);
-    markers.push({ marker: m, owner, zone: z });
+    markers.push({ marker: m, owner });
   }
-
-  buildLegend(counts);
-  applyHighlight();
-  setStatus(`${zones.length} zones · ${counts.size} distinct owners in view.`);
+  buildLegend();
+  applyFilter();
 }
 
-function buildLegend(counts) {
+function buildLegend() {
+  const counts = new Map();
+  for (const { owner } of markers) counts.set(owner, (counts.get(owner) || 0) + 1);
+  const q = document.getElementById("search").value.trim().toLowerCase();
   const el = document.getElementById("legend");
   el.innerHTML = "";
-  const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  const sorted = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .filter(([o]) => !q || o.toLowerCase().includes(q));
   for (const [owner, n] of sorted) {
-    const row = document.createElement("div");
-    row.className = "owner" + (owner === highlighted ? " active" : "");
-    row.innerHTML = `<span class="swatch" style="background:${colorForOwner(owner)}"></span>
-                     <span class="name">${esc(owner)}</span><span class="count">${n}</span>`;
-    row.onclick = () => { highlighted = (highlighted === owner) ? null : owner; refreshLegendActive(); applyHighlight(); };
+    const row = document.createElement("label");
+    row.className = "owner";
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.checked = selected.has(owner);
+    cb.onchange = () => { cb.checked ? selected.add(owner) : selected.delete(owner); applyFilter(); updateTitle(); };
+    row.appendChild(cb);
+    const sw = document.createElement("span"); sw.className = "swatch"; sw.style.background = colorForOwner(owner); row.appendChild(sw);
+    const nm = document.createElement("span"); nm.className = "name"; nm.textContent = owner; row.appendChild(nm);
+    const ct = document.createElement("span"); ct.className = "count"; ct.textContent = n; row.appendChild(ct);
     el.appendChild(row);
   }
-}
-function refreshLegendActive() {
-  document.querySelectorAll(".owner").forEach(r => {
-    r.classList.toggle("active", r.querySelector(".name").textContent === highlighted);
-  });
+  updateTitle();
 }
 
-function applyHighlight() {
-  const q = document.getElementById("search").value.trim().toLowerCase();
+function updateTitle() {
+  document.getElementById("legend-title").textContent =
+    selected.size ? `Showing ${selected.size} selected owner(s) — untick to show all` : "Owners in view — tick to show only those";
+}
+
+function applyFilter() {
+  const active = selected.size > 0;
   for (const { marker, owner } of markers) {
-    let match = true;
-    if (highlighted) match = owner === highlighted;
-    else if (q) match = owner.toLowerCase().includes(q);
-    marker.setStyle({
-      fillOpacity: match ? 0.95 : 0.12,
-      opacity: match ? 1 : 0.15,
-      radius: (highlighted || q) ? (match ? 8 : 4) : 6
-    });
-    if (match && (highlighted || q)) marker.bringToFront();
-  }
-}
-
-// ---- data fetch ---------------------------------------------------------
-async function loadZones() {
-  const b = map.getBounds();
-  const body = [{
-    northEast: { latitude: b.getNorth(), longitude: b.getEast() },
-    southWest: { latitude: b.getSouth(), longitude: b.getWest() }
-  }];
-  setStatus("Loading zones…");
-  try {
-    const res = await fetch(API, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
-    });
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    const zones = await res.json();
-    render(zones);
-  } catch (e) {
-    setStatus("Failed to load: " + e.message + " (try zooming in — very large areas can time out).");
+    const on = !active || selected.has(owner);
+    marker.setStyle({ fillOpacity: on ? 0.95 : 0.06, opacity: on ? 1 : 0.08, radius: !active ? 6 : (on ? 8 : 3) });
+    if (on && active) marker.bringToFront();
   }
 }
 
 // ---- events -------------------------------------------------------------
 document.getElementById("load").onclick = loadZones;
-document.getElementById("clearHi").onclick = () => {
-  highlighted = null; document.getElementById("search").value = ""; refreshLegendActive(); applyHighlight();
-};
-document.getElementById("search").addEventListener("input", () => { highlighted = null; refreshLegendActive(); applyHighlight(); });
+document.getElementById("stop").onclick = () => { loadToken++; setBusy(false); setStatus(`Stopped · ${zonesById.size} zones loaded.`); };
+document.getElementById("search").addEventListener("input", buildLegend);
+document.getElementById("all").onclick = () => { for (const { owner } of markers) selected.add(owner); buildLegend(); applyFilter(); };
+document.getElementById("none").onclick = () => { selected.clear(); buildLegend(); applyFilter(); };
 document.getElementById("locate").onclick = () => {
   setStatus("Locating…");
   navigator.geolocation.getCurrentPosition(
@@ -226,7 +274,6 @@ document.getElementById("locate").onclick = () => {
   );
 };
 
-// initial load over Copenhagen
 loadZones();
 </script>
 </body>
