@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>Turf Zones — ownership map</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+  :root { color-scheme: light dark; }
+  html, body { margin: 0; height: 100%; font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  #map { position: absolute; inset: 0; }
+
+  .panel {
+    position: absolute; top: 10px; left: 10px; z-index: 1000;
+    width: 300px; max-height: calc(100% - 20px); display: flex; flex-direction: column;
+    background: rgba(255,255,255,0.95); border-radius: 12px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.25); overflow: hidden;
+  }
+  @media (prefers-color-scheme: dark) { .panel { background: rgba(30,30,34,0.95); color: #eee; } }
+  .panel header { padding: 12px 14px 8px; }
+  .panel h1 { font-size: 15px; margin: 0 0 2px; }
+  .panel .sub { font-size: 11px; opacity: 0.65; }
+  .controls { padding: 4px 14px 10px; display: flex; flex-direction: column; gap: 8px; }
+  .row { display: flex; gap: 6px; }
+  button, input {
+    font: inherit; padding: 7px 10px; border-radius: 8px; border: 1px solid rgba(128,128,128,0.4);
+    background: rgba(128,128,128,0.08); color: inherit;
+  }
+  button { cursor: pointer; flex: 1; }
+  button.primary { background: #007aff; color: #fff; border-color: #007aff; font-weight: 600; }
+  button:active { transform: translateY(1px); }
+  input { flex: 1; }
+  .status { padding: 0 14px 8px; font-size: 11px; opacity: 0.7; min-height: 14px; }
+  .legend { overflow-y: auto; padding: 0 6px 8px; border-top: 1px solid rgba(128,128,128,0.2); }
+  .legend-title { padding: 8px 8px 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; opacity: 0.55; }
+  .owner {
+    display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 7px; cursor: pointer;
+  }
+  .owner:hover { background: rgba(128,128,128,0.15); }
+  .owner.active { background: rgba(0,122,255,0.18); }
+  .swatch { width: 13px; height: 13px; border-radius: 50%; flex: 0 0 auto; border: 1px solid rgba(0,0,0,0.25); }
+  .owner .name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .owner .count { opacity: 0.6; font-variant-numeric: tabular-nums; }
+  .leaflet-popup-content { font: 13px/1.45 -apple-system, sans-serif; }
+  .pop-name { font-size: 15px; font-weight: 700; margin-bottom: 4px; }
+  .pop-owner { font-weight: 600; }
+  .pop-grid { display: grid; grid-template-columns: auto auto; gap: 1px 10px; margin-top: 6px; }
+  .pop-grid .k { opacity: 0.6; }
+  .pop-grid .v { text-align: right; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div class="panel">
+  <header>
+    <h1>Turf Zones — ownership</h1>
+    <div class="sub">Live data from api.turfgame.com · v5</div>
+  </header>
+  <div class="controls">
+    <button id="load" class="primary">Load zones in this view</button>
+    <div class="row">
+      <button id="locate">📍 Near me</button>
+      <button id="clearHi" title="Clear owner highlight">Clear</button>
+    </div>
+    <input id="search" type="search" placeholder="Highlight a player / clan…" />
+  </div>
+  <div class="status" id="status">Move/zoom the map, then “Load zones in this view”.</div>
+  <div class="legend">
+    <div class="legend-title">Owners in view (by zone count)</div>
+    <div id="legend"></div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const API = "https://api.turfgame.com/v5/zones";
+const CPH = [55.6761, 12.5683];               // Copenhagen
+const SJAELLAND = [[54.9, 11.0], [56.2, 12.75]]; // fallback bounds
+
+const map = L.map("map", { zoomControl: true }).setView(CPH, 13);
+L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
+  attribution: '© OpenStreetMap © CARTO · zones © Turf',
+  maxZoom: 20, subdomains: "abcd"
+}).addTo(map);
+
+const zoneLayer = L.layerGroup().addTo(map);
+let markers = [];          // { marker, owner, zone }
+let highlighted = null;    // owner name currently highlighted
+
+// ---- deterministic color per owner --------------------------------------
+const colorCache = new Map();
+function colorForOwner(name) {
+  if (colorCache.has(name)) return colorCache.get(name);
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+  const hue = h % 360;
+  const sat = 62 + (h >> 9) % 25;   // 62–86%
+  const lit = 42 + (h >> 4) % 12;   // 42–53%
+  const c = `hsl(${hue} ${sat}% ${lit}%)`;
+  colorCache.set(name, c);
+  return c;
+}
+
+// ---- helpers ------------------------------------------------------------
+function ago(iso) {
+  if (!iso) return "—";
+  const then = new Date(iso.replace("+0000", "Z")).getTime();
+  const s = Math.max(0, (Date.now() - then) / 1000);
+  const d = s / 86400, h = s / 3600, m = s / 60;
+  if (d >= 2) return Math.floor(d) + " days ago";
+  if (h >= 2) return Math.floor(h) + " h ago";
+  if (m >= 2) return Math.floor(m) + " min ago";
+  return "just now";
+}
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+function setStatus(msg) { document.getElementById("status").textContent = msg; }
+
+// ---- rendering ----------------------------------------------------------
+function popupHtml(z) {
+  const owner = z.currentOwner ? z.currentOwner.name : "(neutral)";
+  const region = z.region ? `${z.region.name || ""}${z.region.country ? ", " + z.region.country.toUpperCase() : ""}` : "";
+  return `
+    <div class="pop-name">${esc(z.name)}</div>
+    <div>Owner: <span class="pop-owner" style="color:${colorForOwner(owner)}">${esc(owner)}</span></div>
+    <div class="pop-grid">
+      <span class="k">Last taken</span><span class="v">${ago(z.dateLastTaken)}</span>
+      <span class="k">Total takeovers</span><span class="v">${z.totalTakeovers ?? "—"}</span>
+      <span class="k">Points / hour</span><span class="v">${z.pointsPerHour ?? "—"}</span>
+      <span class="k">Takeover points</span><span class="v">${z.takeoverPoints ?? "—"}</span>
+      ${region ? `<span class="k">Region</span><span class="v">${esc(region)}</span>` : ""}
+    </div>
+    <div style="margin-top:6px"><a href="https://turfgame.com/zone/${encodeURIComponent(z.name)}" target="_blank">Open on turfgame.com ↗</a></div>`;
+}
+
+function render(zones) {
+  zoneLayer.clearLayers();
+  markers = [];
+  const counts = new Map();
+
+  for (const z of zones) {
+    const owner = z.currentOwner ? z.currentOwner.name : "(neutral)";
+    counts.set(owner, (counts.get(owner) || 0) + 1);
+    const color = colorForOwner(owner);
+    const m = L.circleMarker([z.latitude, z.longitude], {
+      radius: 6, weight: 1.5, color: "#fff", fillColor: color, fillOpacity: 0.9
+    });
+    m.bindPopup(() => popupHtml(z), { maxWidth: 260 });
+    m.bindTooltip(`${z.name} — ${owner}`, { direction: "top" });
+    m.addTo(zoneLayer);
+    markers.push({ marker: m, owner, zone: z });
+  }
+
+  buildLegend(counts);
+  applyHighlight();
+  setStatus(`${zones.length} zones · ${counts.size} distinct owners in view.`);
+}
+
+function buildLegend(counts) {
+  const el = document.getElementById("legend");
+  el.innerHTML = "";
+  const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  for (const [owner, n] of sorted) {
+    const row = document.createElement("div");
+    row.className = "owner" + (owner === highlighted ? " active" : "");
+    row.innerHTML = `<span class="swatch" style="background:${colorForOwner(owner)}"></span>
+                     <span class="name">${esc(owner)}</span><span class="count">${n}</span>`;
+    row.onclick = () => { highlighted = (highlighted === owner) ? null : owner; refreshLegendActive(); applyHighlight(); };
+    el.appendChild(row);
+  }
+}
+function refreshLegendActive() {
+  document.querySelectorAll(".owner").forEach(r => {
+    r.classList.toggle("active", r.querySelector(".name").textContent === highlighted);
+  });
+}
+
+function applyHighlight() {
+  const q = document.getElementById("search").value.trim().toLowerCase();
+  for (const { marker, owner } of markers) {
+    let match = true;
+    if (highlighted) match = owner === highlighted;
+    else if (q) match = owner.toLowerCase().includes(q);
+    marker.setStyle({
+      fillOpacity: match ? 0.95 : 0.12,
+      opacity: match ? 1 : 0.15,
+      radius: (highlighted || q) ? (match ? 8 : 4) : 6
+    });
+    if (match && (highlighted || q)) marker.bringToFront();
+  }
+}
+
+// ---- data fetch ---------------------------------------------------------
+async function loadZones() {
+  const b = map.getBounds();
+  const body = [{
+    northEast: { latitude: b.getNorth(), longitude: b.getEast() },
+    southWest: { latitude: b.getSouth(), longitude: b.getWest() }
+  }];
+  setStatus("Loading zones…");
+  try {
+    const res = await fetch(API, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
+    });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const zones = await res.json();
+    render(zones);
+  } catch (e) {
+    setStatus("Failed to load: " + e.message + " (try zooming in — very large areas can time out).");
+  }
+}
+
+// ---- events -------------------------------------------------------------
+document.getElementById("load").onclick = loadZones;
+document.getElementById("clearHi").onclick = () => {
+  highlighted = null; document.getElementById("search").value = ""; refreshLegendActive(); applyHighlight();
+};
+document.getElementById("search").addEventListener("input", () => { highlighted = null; refreshLegendActive(); applyHighlight(); });
+document.getElementById("locate").onclick = () => {
+  setStatus("Locating…");
+  navigator.geolocation.getCurrentPosition(
+    p => { map.setView([p.coords.latitude, p.coords.longitude], 14); loadZones(); },
+    () => setStatus("Location denied — pan the map manually, then Load."),
+    { enableHighAccuracy: true, timeout: 10000 }
+  );
+};
+
+// initial load over Copenhagen
+loadZones();
+</script>
+</body>
+</html>
