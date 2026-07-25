@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta http-equiv="refresh" content="120" />
+<meta name="color-scheme" content="light dark" />
+<title>Turf — {{ .Region }}</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f6f8;
+    --card: #ffffff;
+    --ink: #16181d;
+    --muted: #6b7280;
+    --line: rgba(0,0,0,0.08);
+    --accent: #007aff;
+    --pin: #b45309;
+    --pin-bg: rgba(245, 158, 11, 0.10);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #131418;
+      --card: #1c1e24;
+      --ink: #e8e9ec;
+      --muted: #9aa0aa;
+      --line: rgba(255,255,255,0.10);
+      --accent: #4da3ff;
+      --pin: #fbbf24;
+      --pin-bg: rgba(251, 191, 36, 0.10);
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: max(12px, env(safe-area-inset-top)) 12px calc(24px + env(safe-area-inset-bottom));
+  }
+  main { max-width: 640px; margin: 0 auto; }
+  header { padding: 4px 4px 12px; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+
+  .card {
+    background: var(--card); border-radius: 14px; overflow: hidden;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.06), 0 4px 16px rgba(0,0,0,0.05);
+  }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  thead th {
+    position: sticky; top: 0; background: var(--card); z-index: 1;
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--muted); font-weight: 600; text-align: right;
+    padding: 10px 8px 8px; border-bottom: 1px solid var(--line);
+  }
+  thead th:first-child, thead th:nth-child(2) { text-align: left; }
+  td {
+    padding: 9px 8px; border-bottom: 1px solid var(--line);
+    text-align: right; white-space: nowrap;
+  }
+  tr:last-child td { border-bottom: 0; }
+  .pos { text-align: left; color: var(--muted); width: 2.2em; font-size: 13px; padding-left: 12px; }
+  .name {
+    text-align: left; font-weight: 550; width: 99%;
+    overflow: hidden; text-overflow: ellipsis; max-width: 0;
+  }
+  .name a { color: inherit; text-decoration: none; }
+  .name a:hover { color: var(--accent); text-decoration: underline; }
+  .points { font-weight: 600; }
+  .muted { color: var(--muted); }
+  td:last-child { padding-right: 12px; }
+
+  /* Pinned players are shown whether or not they placed; the accent says which
+     rows are there because you asked, not because they earned it. */
+  tr.pinned { background: var(--pin-bg); }
+  tr.pinned .pos { color: var(--pin); }
+  tr.pinned .name::after {
+    content: "★"; font-size: 10px; color: var(--pin);
+    margin-left: 6px; vertical-align: 1px;
+  }
+
+  nav { margin-top: 14px; padding: 0 4px; font-size: 13px; display: flex; gap: 16px; }
+  nav a { color: var(--accent); text-decoration: none; }
+  nav a:hover { text-decoration: underline; }
+  footer { margin-top: 10px; padding: 0 4px; color: var(--muted); font-size: 11.5px; }
+  .empty { padding: 24px 14px; color: var(--muted); text-align: center; font-size: 13.5px; }
+
+  @media (max-width: 400px) {
+    body { font-size: 14px; }
+    td, thead th { padding-left: 6px; padding-right: 6px; }
+    .pos { padding-left: 10px; }
+    td:last-child { padding-right: 10px; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>{{ .Region }}</h1>
+    <div class="sub">Top {{ .TopN }} by {{ .RankBy }}{{ if .Pinned }} · tracking {{ .Pinned }}{{ end }}</div>
+  </header>
+
+  <div class="card">
+    {{ if .Players }}
+    <table>
+      <thead>
+        <tr>
+          <th>#</th><th>Player</th><th>Points</th><th>PPH</th><th>Zones</th><th>Place</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{ range .Players }}
+        <tr{{ if .Pinned }} class="pinned"{{ end }}>
+          <td class="pos">{{ if .Position }}{{ .Position }}{{ else }}—{{ end }}</td>
+          <td class="name"><a href="https://turfgame.com/user/{{ .Name }}" rel="noreferrer">{{ .Name }}</a></td>
+          <td class="points">{{ .Points }}</td>
+          <td class="muted">{{ .PointsPerHour }}</td>
+          <td>{{ .Zones }}</td>
+          <td class="muted">{{ if .Place }}{{ .Place }}{{ else }}—{{ end }}</td>
+        </tr>
+        {{ end }}
+      </tbody>
+    </table>
+    {{ else }}
+    <p class="empty">No players yet — the first discovery scan may still be running.</p>
+    {{ end }}
+  </div>
+
+  <nav><a href="/zones">Zone map</a><a href="/status">Status</a></nav>
+  <footer>Updated {{ .Updated }} · points reset each monthly round</footer>
+</main>
+</body>
+</html>

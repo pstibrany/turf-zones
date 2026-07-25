@@ -1,22 +1,25 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html/template"
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"text/tabwriter"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -28,6 +31,20 @@ import (
 // feedCursorKey is where the newest processed event time is persisted, so a
 // restart resumes instead of re-reading (or worse, skipping) events.
 const feedCursorKey = "feed.takeover.cursor"
+
+// Pages are compiled into the binary so it runs standalone, with no asset
+// directory to deploy alongside it. index.html is the zone map, which doubles as
+// the GitHub Pages entry point for this repository — hence the name.
+//
+//go:embed templates/leaderboard.html templates/status.html
+var templateFS embed.FS
+
+//go:embed index.html
+var zoneMapPage []byte
+
+// pageTemplates is parsed once at startup: every page is rendered from memory,
+// so serving one never touches the database or the Turf API.
+var pageTemplates = template.Must(template.ParseFS(templateFS, "templates/*.html"))
 
 // ---------------------------------------------------------------------------
 // Monitored area
@@ -69,6 +86,9 @@ type areaSelector struct {
 	regions   map[int64]bool
 	areas     map[int64]bool
 	summary   string
+	// regionName is the display name when exactly one region is monitored, so
+	// pages can say "Hovedstaden" rather than "172".
+	regionName string
 }
 
 func (s areaSelector) matches(r *Region) bool {
@@ -103,8 +123,11 @@ func resolveSelector(ctx context.Context, c *turfClient, countries, regions, are
 		}
 	}
 
+	// Fetch the catalog whenever regions or areas are configured, even when they
+	// were given as numeric ids: it validates them, and it supplies the names the
+	// pages display. One request at startup.
 	var catalog []CountryRegions
-	if needsNameLookup(regions) || needsNameLookup(areas) {
+	if len(regions) > 0 || len(areas) > 0 {
 		var err error
 		if catalog, err = c.regions(ctx); err != nil {
 			return areaSelector{}, fmt.Errorf("resolving region names: %w", err)
@@ -143,15 +166,21 @@ func resolveSelector(ctx context.Context, c *turfClient, countries, regions, are
 	if len(parts) > 0 {
 		sel.summary = strings.Join(parts, " ")
 	}
+	if len(sel.regions) == 1 {
+		for id := range sel.regions {
+			sel.regionName = names[id]
+		}
+	}
 	return sel, nil
 }
 
 func lookupRegion(catalog []CountryRegions, countries map[string]bool, spec string) (int64, string, error) {
-	if id, err := strconv.ParseInt(spec, 10, 64); err == nil {
-		return id, "", nil
-	}
+	wantID, isID := parseID(spec)
 	for _, cr := range catalog {
-		if countryAllowed(countries, cr.Country) && strings.EqualFold(cr.Name, spec) {
+		if !countryAllowed(countries, cr.Country) {
+			continue
+		}
+		if (isID && cr.ID == wantID) || (!isID && strings.EqualFold(cr.Name, spec)) {
 			return cr.ID, cr.Name, nil
 		}
 	}
@@ -159,15 +188,13 @@ func lookupRegion(catalog []CountryRegions, countries map[string]bool, spec stri
 }
 
 func lookupArea(catalog []CountryRegions, countries map[string]bool, spec string) (int64, string, error) {
-	if id, err := strconv.ParseInt(spec, 10, 64); err == nil {
-		return id, "", nil
-	}
+	wantID, isID := parseID(spec)
 	for _, cr := range catalog {
 		if !countryAllowed(countries, cr.Country) {
 			continue
 		}
 		for _, a := range cr.Areas {
-			if strings.EqualFold(a.Name, spec) {
+			if (isID && a.ID == wantID) || (!isID && strings.EqualFold(a.Name, spec)) {
 				return a.ID, a.Name, nil
 			}
 		}
@@ -179,11 +206,9 @@ func countryAllowed(countries map[string]bool, country string) bool {
 	return len(countries) == 0 || countries[strings.ToLower(country)]
 }
 
-func needsNameLookup(specs []string) bool {
-	return slices.ContainsFunc(specs, func(s string) bool {
-		_, err := strconv.ParseInt(s, 10, 64)
-		return err != nil
-	})
+func parseID(spec string) (int64, bool) {
+	id, err := strconv.ParseInt(spec, 10, 64)
+	return id, err == nil
 }
 
 func countryList(countries map[string]bool) string {
@@ -251,7 +276,20 @@ type exporter struct {
 	// it. Feed timestamps have whole-second resolution, so nothing is lost.
 	feedCursorUnix atomic.Int64
 
+	// dbStats is sampled after each stats refresh so the status page can report
+	// database size without running a query per request.
+	dbStats atomic.Pointer[dbStats]
+
 	startedAt time.Time
+}
+
+// dbStats is a point-in-time measurement of how much the database holds.
+type dbStats struct {
+	Bytes       int64
+	Takeovers   int64
+	HistoryRows int64
+	Players     int64
+	MeasuredAt  time.Time
 }
 
 func (e *exporter) cursor() time.Time {
@@ -758,10 +796,37 @@ func (e *exporter) refreshStats(ctx context.Context) error {
 	ranked := e.rankSamples(samples, pinned)
 	e.players.set(ranked)
 	e.metrics.exposedPlayers.Set(float64(len(ranked)))
+	e.measureDB(ctx)
 
 	e.log.Info("refreshed player stats", "roster", len(roster),
 		"fetched", len(users), "exposed", len(ranked), "rank_by", string(e.rank))
 	return nil
+}
+
+// measureDB samples database size and row counts for the status page. Errors are
+// logged and dropped: a stale size on a status page is not worth failing a
+// refresh over.
+func (e *exporter) measureDB(ctx context.Context) {
+	s := &dbStats{MeasuredAt: time.Now()}
+
+	// WAL and shared-memory files are part of what the volume is holding, so
+	// reporting only the main file would understate it.
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if info, err := os.Stat(e.cfg.DBPath + suffix); err == nil {
+			s.Bytes += info.Size()
+		}
+	}
+	if n, err := e.store.countPlayers(ctx); err == nil {
+		s.Players = n
+	}
+	if n, err := e.store.countTakeovers(ctx); err == nil {
+		s.Takeovers = n
+	}
+	if n, err := e.store.countHistory(ctx); err == nil {
+		s.HistoryRows = n
+	}
+	e.dbStats.Store(s)
+	e.metrics.dbBytes.Set(float64(s.Bytes))
 }
 
 // recordHistory writes a snapshot for the current time bucket. Failing to store
@@ -861,6 +926,7 @@ func (e *exporter) rankSamples(samples []playerSample, pinned map[int64]bool) []
 	out := make([]playerSample, 0, min(len(samples), e.cfg.TopN)+len(pinned))
 	for i := range samples {
 		s := samples[i]
+		s.Pinned = pinned[s.User.ID]
 		inTop := i < e.cfg.TopN
 		if inTop {
 			s.Position = i + 1
@@ -937,7 +1003,9 @@ func (e *exporter) publicMux() *http.ServeMux {
 	mux.Handle("/api/players", e.requireToken(http.HandlerFunc(e.handleAPIPlayers)))
 	mux.Handle("/api/history", e.requireToken(http.HandlerFunc(e.handleAPIHistory)))
 	mux.HandleFunc("/healthz", handleHealthz)
-	mux.HandleFunc("/", e.handleIndex)
+	mux.HandleFunc("/zones", handleZoneMap)
+	mux.HandleFunc("/status", e.handleStatus)
+	mux.HandleFunc("/", e.handleLeaderboard)
 	return mux
 }
 
@@ -995,38 +1063,191 @@ func (e *exporter) serve(ctx context.Context, name, address string, handler http
 	}
 }
 
-// handleIndex renders the current top list as plain text, which is the quickest
-// way to tell whether discovery is working without parsing /metrics.
-func (e *exporter) handleIndex(w http.ResponseWriter, r *http.Request) {
+// leaderRow is one row of the leaderboard page.
+type leaderRow struct {
+	Position      int
+	Name          string
+	Points        int64
+	PointsPerHour int64
+	Zones         int
+	Place         int64
+	Pinned        bool
+}
+
+// handleLeaderboard renders the current top list. The snapshot it reads is the
+// same one /metrics serves, so the page cannot disagree with the metrics.
+func (e *exporter) handleLeaderboard(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
 		return
 	}
 	samples := e.players.snapshot()
-
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	tw := tabwriter.NewWriter(w, 0, 8, 2, ' ', 0)
-	fmt.Fprintf(tw, "turf-exporter\t\n")
-	fmt.Fprintf(tw, "area:\t%s\n", e.sel.summary)
-	fmt.Fprintf(tw, "ranked by:\t%s (top %d)\n", e.rank, e.cfg.TopN)
-	fmt.Fprintf(tw, "uptime:\t%s\n", time.Since(e.startedAt).Round(time.Second))
-	fmt.Fprintf(tw, "feed cursor:\t%s\n\n", formatTime(e.cursor()))
-
-	fmt.Fprintln(tw, "#\tplayer\tid\tpoints\tpph\tzones\tarea zones\ttakeovers\tobserved\tplace")
+	rows := make([]leaderRow, 0, len(samples))
+	updated := time.Time{}
 	for _, s := range samples {
-		position := "-"
-		if s.Position > 0 {
-			position = strconv.Itoa(s.Position)
+		rows = append(rows, leaderRow{
+			Position: s.Position, Name: s.User.Name, Points: s.User.Points,
+			PointsPerHour: s.User.PointsPerHour, Zones: len(s.User.Zones),
+			Place: s.User.Place, Pinned: s.Pinned,
+		})
+		if s.UpdatedAt.After(updated) {
+			updated = s.UpdatedAt
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%d\t%s\t%d\t%d\t%d\n",
-			position, s.User.Name, s.User.ID, s.User.Points, s.User.PointsPerHour,
-			len(s.User.Zones), formatAreaZones(s.AreaZones), s.User.Taken,
-			s.ObservedTakeovers, s.User.Place)
 	}
-	if len(samples) == 0 {
-		fmt.Fprintln(tw, "(no players yet — the first discovery scan may still be running)")
+
+	e.renderPage(w, "leaderboard.html", map[string]any{
+		"Region":  e.regionTitle(),
+		"RankBy":  rankLabel(e.rank),
+		"TopN":    e.cfg.TopN,
+		"Pinned":  strings.Join(e.cfg.Players, ", "),
+		"Players": rows,
+		"Updated": relativeTime(updated),
+	})
+}
+
+// handleStatus renders operational state: how long the process has been up, how
+// current the feed is, and how large the database has grown.
+func (e *exporter) handleStatus(w http.ResponseWriter, r *http.Request) {
+	cursor := e.cursor()
+	feedAge := "—"
+	if !cursor.IsZero() {
+		feedAge = time.Since(cursor).Round(time.Second).String()
 	}
-	_ = tw.Flush()
+
+	data := map[string]any{
+		"Area":        e.sel.summary,
+		"Uptime":      time.Since(e.startedAt).Round(time.Second).String(),
+		"Started":     e.startedAt.UTC().Format("2006-01-02 15:04:05 MST"),
+		"FeedCursor":  formatTime(cursor),
+		"FeedAge":     feedAge,
+		"DBSize":      "—",
+		"Takeovers":   "—",
+		"HistoryRows": "—",
+		"Players":     "—",
+		"DBMeasured":  "not yet measured",
+	}
+	// Database figures are sampled after each stats refresh rather than per
+	// request, so loading this page costs no queries.
+	if s := e.dbStats.Load(); s != nil {
+		data["DBSize"] = humanBytes(s.Bytes)
+		data["Takeovers"] = formatCount(s.Takeovers)
+		data["HistoryRows"] = formatCount(s.HistoryRows)
+		data["Players"] = formatCount(s.Players)
+		data["DBMeasured"] = relativeTime(s.MeasuredAt)
+	}
+	e.renderPage(w, "status.html", data)
+}
+
+// handleZoneMap serves the embedded zone ownership map, the same page published
+// to GitHub Pages. It calls the Turf API directly from the browser, so it needs
+// nothing from this process beyond being handed to the client.
+func handleZoneMap(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/zones" {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	_, _ = w.Write(zoneMapPage)
+}
+
+// renderPage renders into a buffer first, so a template error surfaces as a 500
+// rather than as a half-written page with a 200 already committed.
+func (e *exporter) renderPage(w http.ResponseWriter, name string, data any) {
+	var buf bytes.Buffer
+	if err := pageTemplates.ExecuteTemplate(&buf, name, data); err != nil {
+		e.log.Error("rendering page", "template", name, "err", err)
+		http.Error(w, "template error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write(buf.Bytes())
+}
+
+// regionTitle is the friendliest name available for the monitored area: the
+// configured region name when one was given, otherwise the selector summary.
+func (e *exporter) regionTitle() string {
+	if len(e.cfg.Regions) == 1 {
+		if _, err := strconv.ParseInt(e.cfg.Regions[0], 10, 64); err != nil {
+			return e.cfg.Regions[0] // a name was configured, use it verbatim
+		}
+	}
+	if name := e.sel.regionName; name != "" {
+		return name
+	}
+	return e.sel.summary
+}
+
+func rankLabel(r rankBy) string {
+	switch r {
+	case "points":
+		return "round points"
+	case "totalPoints":
+		return "all-time points"
+	case "pointsPerHour":
+		return "points per hour"
+	case "taken":
+		return "takeovers"
+	case "areaZones":
+		return "zones held here"
+	default:
+		return string(r)
+	}
+}
+
+// humanBytes formats a byte count for people rather than for machines.
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	value := float64(n)
+	for _, suffix := range []string{"KiB", "MiB", "GiB", "TiB"} {
+		value /= unit
+		if value < unit {
+			return fmt.Sprintf("%.1f %s", value, suffix)
+		}
+	}
+	return fmt.Sprintf("%.1f PiB", value)
+}
+
+// formatCount groups thousands with thin spaces, which reads better than commas
+// next to Danish and Swedish player names.
+func formatCount(n int64) string {
+	s := strconv.FormatInt(n, 10)
+	if len(s) <= 3 {
+		return s
+	}
+	var b strings.Builder
+	for i, digit := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			b.WriteString(" ")
+		}
+		b.WriteRune(digit)
+	}
+	return b.String()
+}
+
+// relativeTime renders an instant as an age, which is what a reader of a status
+// page actually wants to know.
+func relativeTime(t time.Time) string {
+	if t.IsZero() {
+		return "never"
+	}
+	d := time.Since(t)
+	switch {
+	case d < 0:
+		return "just now"
+	case d < time.Minute:
+		return fmt.Sprintf("%ds ago", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	}
 }
 
 // requireToken wraps a handler with bearer token authentication, when a token is
@@ -1278,14 +1499,9 @@ func splitPlayerSpecs(specs []string) (names []string, ids []int64, err error) {
 
 func formatTime(t time.Time) string {
 	if t.IsZero() {
-		return "(none)"
+		return "never"
 	}
-	return t.Format(time.RFC3339)
-}
-
-func formatAreaZones(n int) string {
-	if n < 0 {
-		return "?"
-	}
-	return strconv.Itoa(n)
+	// UTC throughout: the machine's zone is an accident of where it runs, and a
+	// page mixing local and UTC timestamps invites misreading one for the other.
+	return t.UTC().Format("2006-01-02 15:04:05 MST")
 }

@@ -381,6 +381,14 @@ func (s *store) takeoverCounts(ctx context.Context, since time.Time) (map[int64]
 	return out, rows.Err()
 }
 
+// countPlayers returns every player row, including ones that have aged off the
+// roster but not yet been pruned.
+func (s *store) countPlayers(ctx context.Context) (int64, error) {
+	var n int64
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM players`).Scan(&n)
+	return n, err
+}
+
 func (s *store) countTakeovers(ctx context.Context) (int64, error) {
 	var n int64
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM takeovers`).Scan(&n)

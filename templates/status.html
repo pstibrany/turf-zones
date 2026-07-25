@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta http-equiv="refresh" content="120" />
+<meta name="color-scheme" content="light dark" />
+<title>Turf exporter — status</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f6f8; --card: #ffffff; --ink: #16181d;
+    --muted: #6b7280; --line: rgba(0,0,0,0.08); --accent: #007aff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #131418; --card: #1c1e24; --ink: #e8e9ec;
+      --muted: #9aa0aa; --line: rgba(255,255,255,0.10); --accent: #4da3ff;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: max(12px, env(safe-area-inset-top)) 12px calc(24px + env(safe-area-inset-bottom));
+  }
+  main { max-width: 640px; margin: 0 auto; }
+  header { padding: 4px 4px 12px; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+
+  .card {
+    background: var(--card); border-radius: 14px; overflow: hidden;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.06), 0 4px 16px rgba(0,0,0,0.05);
+    margin-bottom: 12px;
+  }
+  .card h2 {
+    margin: 0; padding: 11px 14px 9px; font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted);
+    border-bottom: 1px solid var(--line);
+  }
+  dl { margin: 0; }
+  .item {
+    display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
+    padding: 9px 14px; border-bottom: 1px solid var(--line);
+  }
+  .item:last-child { border-bottom: 0; }
+  dt { color: var(--muted); font-size: 13.5px; flex: 0 0 auto; }
+  dd {
+    margin: 0; text-align: right; font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+  }
+  dd small { color: var(--muted); font-weight: 400; }
+
+  nav { margin-top: 14px; padding: 0 4px; font-size: 13px; display: flex; gap: 16px; }
+  nav a { color: var(--accent); text-decoration: none; }
+  nav a:hover { text-decoration: underline; }
+
+  @media (max-width: 400px) {
+    body { font-size: 14px; }
+    .item { padding-left: 12px; padding-right: 12px; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Status</h1>
+    <div class="sub">{{ .Area }}</div>
+  </header>
+
+  <div class="card">
+    <h2>Process</h2>
+    <dl>
+      <div class="item"><dt>Uptime</dt><dd>{{ .Uptime }}</dd></div>
+      <div class="item"><dt>Started</dt><dd>{{ .Started }}</dd></div>
+    </dl>
+  </div>
+
+  <div class="card">
+    <h2>Takeover feed</h2>
+    <dl>
+      <div class="item"><dt>Cursor</dt><dd>{{ .FeedCursor }}</dd></div>
+      <div class="item"><dt>Behind by</dt><dd>{{ .FeedAge }}</dd></div>
+    </dl>
+  </div>
+
+  <div class="card">
+    <h2>Database</h2>
+    <dl>
+      <div class="item"><dt>Size</dt><dd>{{ .DBSize }}</dd></div>
+      <div class="item"><dt>Takeovers</dt><dd>{{ .Takeovers }}</dd></div>
+      <div class="item"><dt>History rows</dt><dd>{{ .HistoryRows }}</dd></div>
+      <div class="item"><dt>Players known</dt><dd>{{ .Players }}</dd></div>
+      <div class="item"><dt>Measured</dt><dd>{{ .DBMeasured }}</dd></div>
+    </dl>
+  </div>
+
+  <nav><a href="/">Leaderboard</a><a href="/zones">Zone map</a></nav>
+</main>
+</body>
+</html>

@@ -36,6 +36,7 @@ type opsMetrics struct {
 	refreshTime prometheus.Gauge
 
 	unauthorized prometheus.Counter
+	dbBytes      prometheus.Gauge
 
 	historyWrites *prometheus.CounterVec
 	historyRows   prometheus.Counter
@@ -109,6 +110,11 @@ func newOpsMetrics(reg prometheus.Registerer) *opsMetrics {
 		refreshTime: f.gauge(prometheus.GaugeOpts{
 			Name: "turf_stats_last_success_timestamp_seconds",
 			Help: "When the player stats were last refreshed successfully.",
+		}),
+
+		dbBytes: f.gauge(prometheus.GaugeOpts{
+			Name: "turf_db_size_bytes",
+			Help: "Size of the SQLite database including its WAL, sampled after each stats refresh.",
 		}),
 
 		unauthorized: f.counter(prometheus.CounterOpts{
@@ -216,7 +222,9 @@ type playerSample struct {
 	// ObservedTakeovers is how many takeovers we recorded for this player from
 	// the feed, within the takeover retention window.
 	ObservedTakeovers int64
-	UpdatedAt         time.Time
+	// Pinned means the player is tracked by configuration rather than by rank.
+	Pinned    bool
+	UpdatedAt time.Time
 }
 
 var playerLabels = []string{"player", "player_id"}
