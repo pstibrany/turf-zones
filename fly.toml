@@ -13,6 +13,15 @@ primary_region = "arn"
   # Always tracked, whether or not they make the top list.
   TURF_PLAYERS = "hula,Alanda"
 
+# TURF_API_TOKEN guards /api/* and is deliberately NOT set here: this file is
+# committed, and a secret in git stays in git. Set it out of band, which also
+# avoids it ever being displayed:
+#
+#   fly secrets set TURF_API_TOKEN=$(openssl rand -hex 32)
+#
+# Leaving it unset keeps /api/* open, which is fine while the app has no public
+# service and is only reachable on the Fly private network.
+
 # SQLite lives here. 1 GB is far more than the takeover history needs; it is the
 # smallest size worth asking for.
 [[mounts]]

@@ -35,6 +35,7 @@ type Config struct {
 	APIBaseURL     string
 	APIMinInterval time.Duration
 	APIMaxRetries  int
+	APIToken       string
 
 	Countries stringList
 	Regions   stringList
@@ -125,6 +126,8 @@ func (c *Config) registerFlags(fs *flag.FlagSet) {
 	fs.DurationVar(&c.APIMinInterval, "api.min-interval", c.APIMinInterval,
 		"Minimum spacing between Turf API requests. The API allows one per second globally, so this cannot go below 1s — and only one instance may run per source address.")
 	fs.IntVar(&c.APIMaxRetries, "api.max-retries", c.APIMaxRetries, "Retries after a failed Turf API request.")
+	fs.StringVar(&c.APIToken, "api.token", c.APIToken,
+		"Bearer token required on /api/* requests; empty leaves them open, which is fine while the app is only reachable privately. Prefer setting TURF_API_TOKEN in the environment — a command-line flag is visible in the process list. /metrics is never guarded, so Fly's Prometheus can still scrape it.")
 
 	fs.Var(&c.Countries, "turf.countries", "Comma-separated country codes to monitor.")
 	fs.Var(&c.Regions, "turf.regions",
@@ -204,6 +207,11 @@ func (c *Config) validate() error {
 	}
 	if c.RosterTTL <= 0 {
 		return fmt.Errorf("roster.ttl must be positive")
+	}
+	// A token short enough to brute-force is worse than none, because it invites
+	// the belief that the endpoint is protected.
+	if c.APIToken != "" && len(c.APIToken) < 16 {
+		return fmt.Errorf("api.token must be at least 16 characters; generate one with: openssl rand -hex 32")
 	}
 	if c.DBPath == "" {
 		return fmt.Errorf("db.path must be set")

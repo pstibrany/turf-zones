@@ -35,6 +35,8 @@ type opsMetrics struct {
 	refreshes   *prometheus.CounterVec
 	refreshTime prometheus.Gauge
 
+	unauthorized prometheus.Counter
+
 	historyWrites *prometheus.CounterVec
 	historyRows   prometheus.Counter
 	historyStored prometheus.Gauge
@@ -107,6 +109,11 @@ func newOpsMetrics(reg prometheus.Registerer) *opsMetrics {
 		refreshTime: f.gauge(prometheus.GaugeOpts{
 			Name: "turf_stats_last_success_timestamp_seconds",
 			Help: "When the player stats were last refreshed successfully.",
+		}),
+
+		unauthorized: f.counter(prometheus.CounterOpts{
+			Name: "turf_http_unauthorized_total",
+			Help: "Requests to /api/* rejected for a missing or invalid bearer token.",
 		}),
 
 		historyWrites: f.counterVec(prometheus.CounterOpts{

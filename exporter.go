@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -309,6 +311,9 @@ func newExporter(ctx context.Context, cfg Config, log, events *slog.Logger) (*ex
 
 	e.log.Info("monitoring area", "selector", sel.summary,
 		"scan_boxes", cfg.Boxes.String(), "scan_tiles", len(e.scanTiles()))
+	// Never log the token itself, only whether there is one — otherwise the
+	// secret ends up in the log aggregator it was meant to be protected from.
+	e.log.Info("api endpoints configured", "authenticated", cfg.APIToken != "")
 	return e, nil
 }
 
@@ -934,8 +939,11 @@ func (e *exporter) serve(ctx context.Context) error {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("ok\n"))
 	})
-	mux.HandleFunc("/api/players", e.handleAPIPlayers)
-	mux.HandleFunc("/api/history", e.handleAPIHistory)
+	// Only /api/* is guarded. /metrics stays open because Fly's managed
+	// Prometheus scrapes it over the private network and sends no auth header;
+	// requiring a token there would silently break metrics ingestion.
+	mux.Handle("/api/players", e.requireToken(http.HandlerFunc(e.handleAPIPlayers)))
+	mux.Handle("/api/history", e.requireToken(http.HandlerFunc(e.handleAPIHistory)))
 	mux.HandleFunc("/", e.handleIndex)
 
 	srv := &http.Server{
@@ -998,6 +1006,31 @@ func (e *exporter) handleIndex(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(tw, "(no players yet — the first discovery scan may still be running)")
 	}
 	_ = tw.Flush()
+}
+
+// requireToken wraps a handler with bearer token authentication, when a token is
+// configured. With no token the handler is returned unchanged, which is correct
+// while the app is only reachable on a private network.
+//
+// The token comes from the environment (TURF_API_TOKEN), never from a config
+// file: fly.toml is committed, and a secret in git stays in git.
+func (e *exporter) requireToken(next http.Handler) http.Handler {
+	if e.cfg.APIToken == "" {
+		return next
+	}
+	// Compare digests rather than the raw strings, so neither the token nor its
+	// length leaks through timing.
+	want := sha256.Sum256([]byte("Bearer " + e.cfg.APIToken))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got := sha256.Sum256([]byte(r.Header.Get("Authorization")))
+		if subtle.ConstantTimeCompare(got[:], want[:]) != 1 {
+			e.metrics.unauthorized.Inc()
+			w.Header().Set("WWW-Authenticate", `Bearer realm="turf-exporter"`)
+			httpError(w, http.StatusUnauthorized, "missing or invalid bearer token")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // apiPlayer is the current-standings row served by /api/players.
