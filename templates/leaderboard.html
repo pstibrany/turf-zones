@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta http-equiv="refresh" content="120" />
 <meta name="color-scheme" content="light dark" />
-<title>Turf — {{ .Region }}</title>
+<title>Turf — {{ .Title }}</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -116,7 +116,7 @@
 <body>
 <main>
   <header>
-    <h1>Turf</h1>
+    <h1>{{ .Title }}</h1>
     <div class="sub">Top {{ .TopN }} by {{ .RankBy }}{{ if .Pinned }} · tracking {{ .Pinned }}{{ end }}</div>
   </header>
 
@@ -124,9 +124,11 @@
   <input class="tabstate" type="radio" name="board" id="tab-{{ $i }}"{{ if eq $i 0 }} checked{{ end }} />
   {{ end }}
 
+  {{ if gt (len .Boards) 1 }}
   <div class="tabs">
     {{ range $i, $b := .Boards }}<label for="tab-{{ $i }}">{{ $b.Title }}</label>{{ end }}
   </div>
+  {{ end }}
 
   <div class="panels">
     {{ range $i, $b := .Boards }}

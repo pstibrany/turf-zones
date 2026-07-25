@@ -159,7 +159,7 @@ var countryNames = map[string]string{
 // boards derives the leaderboards from the configured area: a region tab when
 // regions are configured, a country tab when countries are, both when both —
 // which mirrors the game's own tabs without needing separate configuration.
-func (s areaSelector) boards() []board {
+func (s areaSelector) boards(includeCountry bool) []board {
 	var out []board
 	if len(s.regions) > 0 {
 		title := s.regionName
@@ -173,7 +173,10 @@ func (s areaSelector) boards() []board {
 			match: func(u *User) bool { return u.Region != nil && regions[u.Region.ID] },
 		})
 	}
-	if len(s.countries) > 0 {
+	// A country board is only honest when every region of that country is
+	// scanned. Otherwise it is not merely missing players: each absent player
+	// shifts everyone below them up, so the positions themselves are wrong.
+	if includeCountry && len(s.countries) > 0 {
 		codes := sortedKeys(s.countries)
 		titles := make([]string, len(codes))
 		for i, c := range codes {
@@ -198,8 +201,9 @@ func (s areaSelector) boards() []board {
 }
 
 // broadened drops the region and area constraints, keeping only countries. Used
-// for discovery: a country tab needs players from every region of that country,
-// not just the one the bounding box covers.
+// for discovery when a country board exists: that board needs players from every
+// region of the country, not just the one the bounding box covers. With no such
+// board it would only find players who are then immediately dropped as visitors.
 func (s areaSelector) broadened() areaSelector {
 	if len(s.countries) == 0 {
 		return s
@@ -460,12 +464,16 @@ func newExporter(ctx context.Context, cfg Config, log, events *slog.Logger) (*ex
 		players:     newPlayerCollector(),
 		registry:    registry,
 		rank:        rankBy(cfg.RankBy),
-		boards:      sel.boards(),
-		discovery:   sel.broadened(),
+		boards:      sel.boards(cfg.CountryBoard),
 		pinnedNames: names,
 		pinnedIDs:   ids,
 		firstScan:   make(chan struct{}),
 		startedAt:   time.Now(),
+	}
+	if cfg.CountryBoard {
+		e.discovery = sel.broadened()
+	} else {
+		e.discovery = sel
 	}
 	registry.MustRegister(e.players)
 
@@ -1305,7 +1313,12 @@ func (e *exporter) handleLeaderboard(w http.ResponseWriter, r *http.Request) {
 		views = append(views, boardView{Key: b.Key, Title: b.Title, Players: rows})
 	}
 
+	title := "Turf"
+	if len(views) == 1 {
+		title = views[0].Title
+	}
 	e.renderPage(w, "leaderboard.html", map[string]any{
+		"Title":   title,
 		"Boards":  views,
 		"RankBy":  rankLabel(e.rank),
 		"TopN":    e.cfg.TopN,

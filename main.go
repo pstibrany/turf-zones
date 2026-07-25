@@ -59,6 +59,7 @@ type Config struct {
 	StatsInterval time.Duration
 	RosterTTL     time.Duration
 	RosterScope   rosterScope
+	CountryBoard  bool
 	TopN          int
 	RankBy        string
 	Players       stringList
@@ -168,6 +169,8 @@ func (c *Config) registerFlags(fs *flag.FlagSet) {
 		"How long a player stays on the roster after we last saw them active in the area.")
 	fs.Var(rosterScopeValue{&c.RosterScope}, "roster.scope",
 		"Who appears on the leaderboard. 'home' lists players registered to the monitored region, reproducing the game's own regional ranking. 'area' instead lists whoever holds or takes zones here, which surfaces visitors carrying their whole national score.")
+	fs.BoolVar(&c.CountryBoard, "boards.country", c.CountryBoard,
+		"Also show a country-wide leaderboard alongside the region one. Off by default: unless every region of the country is scanned, absent players shift everyone below them up, so the positions are wrong rather than merely incomplete.")
 	fs.IntVar(&c.TopN, "top.n", c.TopN, "How many players to expose as metrics.")
 	fs.StringVar(&c.RankBy, "top.by", c.RankBy, "Stat the top list is ranked by: "+rankByValues()+".")
 	fs.Var(&c.Players, "players",
