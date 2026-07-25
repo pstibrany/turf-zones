@@ -6,7 +6,13 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 
-COPY *.go ./
+# Everything go:embed refers to has to be here too, or the build fails with
+# "pattern ...: no matching files found". Copying named paths rather than the
+# whole tree keeps the local database and the token file out of the image, so
+# add to this line when adding embedded assets.
+COPY *.go index.html ./
+COPY templates ./templates
+
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /turf-exporter .
 
 FROM alpine:3.21
