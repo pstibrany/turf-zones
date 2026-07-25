@@ -69,11 +69,19 @@ type Config struct {
 // (Hovedstaden) in Denmark, top 50 by points scored this round.
 func defaultConfig() Config {
 	return Config{
-		ListenAddress:  ":8080",
-		LogLevel:       "info",
-		LogFormat:      "json",
-		APIBaseURL:     defaultAPIBaseURL,
-		APIMinInterval: 1100 * time.Millisecond,
+		ListenAddress: ":8080",
+		LogLevel:      "info",
+		LogFormat:     "json",
+		APIBaseURL:    defaultAPIBaseURL,
+		// Far more spacing than the API's one-per-second demands, deliberately.
+		// The limiter spaces requests when they *leave*, but the API counts them
+		// when they *arrive*, and variable latency compresses the gap — 1.1s drew
+		// a 429 on the second request of a cold start. Steady state needs only
+		// about one request per minute (a feed poll, plus one batched user refresh
+		// every ten), so this uses under a tenth of the allowance on a free
+		// service that warns about heavy use. The only thing it slows is the
+		// discovery scan, which is sequential: 16 tiles take ~80s.
+		APIMinInterval: 5 * time.Second,
 		APIMaxRetries:  4,
 		Countries:      stringList{"dk"},
 		Regions:        stringList{"172"},
@@ -171,6 +179,14 @@ func (c *Config) validate() error {
 	}
 	if c.FeedInterval <= 0 {
 		return fmt.Errorf("feed.interval must be positive")
+	}
+	// A feed poll needs one request slot per interval. If spacing is wider than
+	// the interval, polls fall behind for good, and takeovers are lost as soon as
+	// the lag passes the feed's ~30 minute retention — silently, since each
+	// individual poll still succeeds.
+	if c.APIMinInterval >= c.FeedInterval {
+		return fmt.Errorf("api.min-interval (%s) must be shorter than feed.interval (%s), or takeover polls cannot keep up",
+			c.APIMinInterval, c.FeedInterval)
 	}
 	if c.StatsInterval <= 0 {
 		return fmt.Errorf("stats.interval must be positive")
