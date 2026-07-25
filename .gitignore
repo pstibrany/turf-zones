@@ -1,7 +1,5 @@
 .claude/
 .DS_Store
-feed-capture/
-monitor_feeds.py
 
 # Go build output and local database
 /turf-zones

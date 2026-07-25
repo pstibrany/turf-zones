@@ -46,6 +46,24 @@ Body is an **array** of box objects:
 - ⚠️ **Multiple boxes in one array is unreliable** — only the first box is
   honoured. To cover a large area, tile it into separate requests (spaced ≥1s)
   and merge/dedupe by zone `id`.
+- ⚠️ **The box has a size limit** — too large returns
+  `{"errorMessage":"The area is too big","errorCode":195887106}` (HTTP 400).
+
+**Measured limit** (at ~55.5°N, binary searched):
+
+| box (Δlat × Δlon) | ≈ km² | result |
+|---|---|---|
+| 0.20 × 0.20 | 280 | OK (257 zones) |
+| 0.15 × 0.30 | 315 | OK (422 zones) |
+| 0.20 × 0.25 | 350 | rejected |
+| 0.10 × 0.50 | 350 | rejected |
+| 0.30 × 0.40 | 838 | rejected |
+
+So the cutoff sits between **315 and 350 km²**, and tracks ground area rather
+than degrees or aspect ratio — 0.10 × 0.50 and 0.20 × 0.25 are the same area and
+both fail. A safe tile is ~0.15 × 0.25 degrees. All of Denmark in one box is
+rejected outright; it needs ~700 tiles. Rather than hard-coding a limit, it is
+more robust to catch `195887106` and split the box into quarters.
 
 **Zone object:**
 
@@ -100,10 +118,25 @@ in one call). Plain string arrays (`["Siper"]`) return **500** — must be objec
   player's `name` or `id`. Discover names by harvesting `currentOwner.name` /
   `previousOwner.name` from `/zones` and `/feeds/takeover`, then batch into `/users`.
 - `zones` (owned) + `POST /zones` lets you plot where a player currently holds ground.
+- **Batches are generous:** 500 players in one request returned all 500
+  (~320 KB) with no error. So a whole regional roster refreshes in one or two
+  calls — the 1 req/sec limit is not the constraint on player stats, discovery is.
+- Unknown names are **omitted from the response**, not reported as an error, and
+  asking for the same player twice (once by `name`, once by `id`) returns them
+  twice. Dedupe by `id`.
 
 ### GET /regions
 
 Array of `{ "country": "nl", "name": "Utrecht", "areas": [{"name","id"}, …] }`.
+
+Denmark's five regions: **172** Hovedstaden, **173** Sjælland, **174**
+Syddanmark, **175** Midtjylland, **176** Nordjylland. Note Bornholms
+Regionskommune (2116) belongs to Hovedstaden despite being 200 km away, so a
+single bounding box will not cover that region.
+
+One call is enough to validate a configured region id *and* get its display
+name, which is worth doing at startup — a wrong id otherwise just yields an
+empty result set with no error.
 
 ### GET /rounds
 
@@ -125,9 +158,28 @@ retained.
 
 - `takeover` — `{ zone:{…, previousOwner, currentOwner}, currentOwner, latitude, longitude, time, type }`
   (carries the full zone, the taker, the previous owner, and points — the richest event).
-- `zone` — `{ zone:{…}, time, type }`
+  `currentOwner`/`latitude`/`longitude` are duplicated at top level and inside `zone`.
+  `previousOwner` is **absent** for a zone that was neutral (new, or start of round).
+- `zone` — `{ zone:{…}, time, type }` — a newly created zone. `dateLastTaken` is
+  the sentinel `0002-12-02T00:00:00+0000` when never taken, which will parse as
+  year 2 rather than fail, so guard against it if you compute ages.
 - `medal` — `{ medal, user, time, type }`
-- `chat` — `{ sender, message, region, time, type }`
+- `chat` — `{ sender, message, region, time, type }`; `sender` is a full user
+  object rather than the usual `{name,id}` pair.
+
+**Volume and geography** (70-minute capture, 21 Jul 2026):
+
+| | |
+|---|---|
+| takeover events | 3413 (≈ 49/min globally) |
+| by country | se 2887 · gb 317 · fi 99 · de 71 · **dk 12** · no 8 · us 4 · nl 1 |
+| `zone` events | 10 |
+| `medal` events | 0 — none in 70 minutes; low volume, not absence |
+
+The feed is **global with no server-side filter**, so a single country must be
+selected client-side on `zone.region`. Denmark was 0.35% of traffic: roughly 10
+events an hour, of which Hovedstaden was about half. Discovering a local player
+base from the feed alone would take days — enumerate zones instead.
 
 **Retention — OBSERVED, not documented (do not rely on exact numbers):**
 
@@ -148,11 +200,56 @@ object, or key on `type`+`time`+zone/user). Keep the interval short (≤ ~5–10
 so you never depend on the undocumented takeover retention. One combined request
 per cycle stays far under the 1 req/sec limit.
 
+### Sample events
+
+Verbatim from `/feeds/takeover` and `/feeds/zone`, 21 Jul 2026 (line-wrapped
+here; they arrive as single-line JSON).
+
+A takeover — note the duplicated owner and coordinates, and that
+`zone.previousOwner` is what tells you who lost the zone:
+
+```json
+{"zone":{"previousOwner":{"name":"Burgundy","id":242299},
+  "dateCreated":"2014-12-24T12:00:00+0000","dateLastTaken":"2026-07-21T16:58:17+0000",
+  "latitude":59.512086,"longitude":15.980183,
+  "currentOwner":{"name":"BjörnBel","id":205132},
+  "name":"Nibblezon","id":42851,"totalTakeovers":9101,
+  "region":{"area":{"name":"Köpings kommun","id":1813},"country":"se",
+            "name":"Västmanland","id":143},
+  "pointsPerHour":4,"takeoverPoints":140},
+ "latitude":59.512086,"longitude":15.980183,
+ "currentOwner":{"name":"BjörnBel","id":205132},
+ "time":"2026-07-21T16:58:17+0000","type":"takeover"}
+```
+
+A new zone — no `currentOwner` at all, and the never-taken sentinel date:
+
+```json
+{"zone":{"dateCreated":"2026-07-21T17:00:00+0000",
+  "dateLastTaken":"0002-12-02T00:00:00+0000",
+  "latitude":55.434991,"longitude":13.849304,
+  "name":"Boulebanor","id":810438,"totalTakeovers":0,
+  "region":{"area":{"name":"Ystads kommun","id":1953},"country":"se",
+            "name":"Skåne","id":135},
+  "pointsPerHour":2,"takeoverPoints":170},
+ "time":"2026-07-21T17:00:00+0000","type":"zone"}
+```
+
 ## Gotchas
 
 - POST-only endpoints (`/zones`, `/users`) 405 on GET.
-- `/users` body must be objects, not strings (else 500).
+- `/users` body must be objects, not strings (else 500); dedupe results by `id`,
+  since one player asked for twice comes back twice.
 - Multi-box `/zones` request → only the first box is used.
+- `/zones` boxes above ~320 km² are rejected (`195887106`); tile, or split on error.
 - 1 req/sec is global; space all calls, retry 429 with backoff.
-- Feed events have no stable id — dedupe by content hash or composite key.
+- **Space requests by noticeably more than 1s.** A client spaces requests when
+  they *leave*; the API counts them when they *arrive*, and variable latency
+  compresses the gap. 1.1s spacing still drew a 429 on the second request of a
+  cold start from Stockholm. 5s costs nothing when steady state is ~1 req/min.
+- The feed is global and unfiltered — filter on `zone.region` yourself.
+- Feed events have no stable id — dedupe by content hash or composite key
+  (`time` + zone id + taker id works for takeovers).
 - Retention windows are observed, not guaranteed; treat them as soft.
+- `dateLastTaken` can be `0002-12-02T00:00:00+0000` for a never-taken zone. It
+  parses fine as year 2, so it corrupts age arithmetic rather than erroring.
