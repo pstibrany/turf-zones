@@ -33,13 +33,14 @@ import (
 const feedCursorKey = "feed.takeover.cursor"
 
 // Pages are compiled into the binary so it runs standalone, with no asset
-// directory to deploy alongside it. index.html is the zone map, which doubles as
-// the GitHub Pages entry point for this repository — hence the name.
+// directory to deploy alongside it. The split is by role: templates/ is parsed
+// and rendered, static/ is served verbatim — the zone map is a self-contained
+// page of HTML and JavaScript that would only be mangled by a template parser.
 //
 //go:embed templates/leaderboard.html templates/status.html
 var templateFS embed.FS
 
-//go:embed index.html
+//go:embed static/zones.html
 var zoneMapPage []byte
 
 // pageTemplates is parsed once at startup: every page is rendered from memory,
@@ -1360,9 +1361,9 @@ func (e *exporter) handleStatus(w http.ResponseWriter, r *http.Request) {
 	e.renderPage(w, "status.html", data)
 }
 
-// handleZoneMap serves the embedded zone ownership map, the same page published
-// to GitHub Pages. It calls the Turf API directly from the browser, so it needs
-// nothing from this process beyond being handed to the client.
+// handleZoneMap serves the embedded zone ownership map. It calls the Turf API
+// directly from the browser, so it needs nothing from this process beyond being
+// handed to the client.
 func handleZoneMap(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/zones" {
 		http.NotFound(w, r)

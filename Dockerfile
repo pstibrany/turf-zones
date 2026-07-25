@@ -10,8 +10,9 @@ RUN go mod download
 # "pattern ...: no matching files found". Copying named paths rather than the
 # whole tree keeps the local database and the token file out of the image, so
 # add to this line when adding embedded assets.
-COPY *.go index.html ./
+COPY *.go ./
 COPY templates ./templates
+COPY static ./static
 
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /turf-exporter .
 
