@@ -28,16 +28,15 @@ var defaultCopenhagenBox = bbox{South: 55.55, West: 11.95, North: 56.12, East: 1
 
 // Config is the exporter's full configuration.
 type Config struct {
-	ListenAddress string
-	LogLevel      string
-	LogFormat     string
+	ListenAddress   string
+	InternalAddress string
+	LogLevel        string
+	LogFormat       string
 
 	APIBaseURL     string
 	APIMinInterval time.Duration
 	APIMaxRetries  int
 	APIToken       string
-
-	MetricsRequireToken bool
 
 	Countries stringList
 	Regions   stringList
@@ -75,10 +74,11 @@ type Config struct {
 // (Hovedstaden) in Denmark, top 50 by points scored this round.
 func defaultConfig() Config {
 	return Config{
-		ListenAddress: ":8080",
-		LogLevel:      "info",
-		LogFormat:     "json",
-		APIBaseURL:    defaultAPIBaseURL,
+		ListenAddress:   ":8080",
+		InternalAddress: ":9090",
+		LogLevel:        "info",
+		LogFormat:       "json",
+		APIBaseURL:      defaultAPIBaseURL,
 		// Far more spacing than the API's one-per-second demands, deliberately.
 		// The limiter spaces requests when they *leave*, but the API counts them
 		// when they *arrive*, and variable latency compresses the gap — 1.1s drew
@@ -89,10 +89,8 @@ func defaultConfig() Config {
 		// discovery scan, which is sequential: 16 tiles take ~80s.
 		APIMinInterval: 5 * time.Second,
 		APIMaxRetries:  4,
-
-		MetricsRequireToken: true,
-		Countries:           stringList{"dk"},
-		Regions:             stringList{"172"},
+		Countries:      stringList{"dk"},
+		Regions:        stringList{"172"},
 
 		ScanEnabled:  true,
 		Boxes:        bboxList{defaultCopenhagenBox},
@@ -122,7 +120,10 @@ func defaultConfig() Config {
 }
 
 func (c *Config) registerFlags(fs *flag.FlagSet) {
-	fs.StringVar(&c.ListenAddress, "listen", c.ListenAddress, "Address to serve /metrics on.")
+	fs.StringVar(&c.ListenAddress, "listen", c.ListenAddress,
+		"Address for the public listener: the status page and the token-guarded /api/* endpoints.")
+	fs.StringVar(&c.InternalAddress, "listen.internal", c.InternalAddress,
+		"Address for the telemetry listener: /metrics and /healthz, unauthenticated. Do not publish this port — keeping it private is what makes the lack of authentication safe. Empty disables it.")
 	fs.StringVar(&c.LogLevel, "log.level", c.LogLevel, "Log level: debug, info, warn or error.")
 	fs.StringVar(&c.LogFormat, "log.format", c.LogFormat, "Log format: json or text.")
 
@@ -132,9 +133,6 @@ func (c *Config) registerFlags(fs *flag.FlagSet) {
 	fs.IntVar(&c.APIMaxRetries, "api.max-retries", c.APIMaxRetries, "Retries after a failed Turf API request.")
 	fs.StringVar(&c.APIToken, "api.token", c.APIToken,
 		"Bearer token required on /api/* requests; empty leaves them open, which is fine while the app is only reachable privately. Prefer setting TURF_API_TOKEN in the environment — a command-line flag is visible in the process list. /metrics is never guarded, so Fly's Prometheus can still scrape it.")
-
-	fs.BoolVar(&c.MetricsRequireToken, "metrics.require-token", c.MetricsRequireToken,
-		"When an api.token is set, also require it for /metrics from the public internet. Requests arriving directly over Fly's private network are always allowed, so the managed Prometheus keeps scraping. Set false if that detection ever misfires.")
 
 	fs.Var(&c.Countries, "turf.countries", "Comma-separated country codes to monitor.")
 	fs.Var(&c.Regions, "turf.regions",
@@ -219,6 +217,9 @@ func (c *Config) validate() error {
 	// the belief that the endpoint is protected.
 	if c.APIToken != "" && len(c.APIToken) < 16 {
 		return fmt.Errorf("api.token must be at least 16 characters; generate one with: openssl rand -hex 32")
+	}
+	if c.ListenAddress != "" && c.ListenAddress == c.InternalAddress {
+		return fmt.Errorf("listen and listen.internal must differ; sharing a port would publish /metrics")
 	}
 	if c.DBPath == "" {
 		return fmt.Errorf("db.path must be set")

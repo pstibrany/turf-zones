@@ -18,6 +18,7 @@ COPY --from=build /turf-exporter /usr/local/bin/turf-exporter
 RUN mkdir -p /data && chown turf:turf /data
 USER turf
 VOLUME /data
-EXPOSE 8080
+# 8080 is published by fly.toml; 9090 carries telemetry and must not be.
+EXPOSE 8080 9090
 
 ENTRYPOINT ["/usr/local/bin/turf-exporter"]

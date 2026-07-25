@@ -28,10 +28,12 @@ primary_region = "arn"
   source = "turf_data"
   destination = "/data"
 
-# Fly's managed Prometheus scrapes this over the private network, so no public
-# service is needed. Reach it locally with:  fly proxy 8080:8080
+# Telemetry lives on 9090, which is deliberately absent from [http_service] and
+# therefore never published. Fly's managed Prometheus reaches it over the private
+# network; the internet cannot. That is why /metrics needs no token.
+# Look at it locally with:  fly proxy 9090:9090
 [metrics]
-  port = 8080
+  port = 9090
   path = "/metrics"
 
 # One machine, always on. The Turf API's rate limit is one request per second per
@@ -44,11 +46,9 @@ primary_region = "arn"
 [deploy]
   strategy = "immediate"
 
-# Public endpoint at https://turf-exporter.fly.dev. This exposes the whole port,
-# not selected paths, so /api/* is bearer-token guarded and /metrics requires the
-# token too unless the request arrives directly over the private network (which
-# is how Fly's managed Prometheus reaches it). The status page at / and /healthz
-# stay open — they only show public game data.
+# Public endpoint at https://turf-exporter.fly.dev. Publishing a port exposes all
+# of it, not selected paths, so only the public listener is here: the status page
+# and the bearer-token guarded /api/*. Metrics are on the unpublished port above.
 #
 # auto_stop must stay false: this is a poller, not a request-driven service, and
 # a stopped machine silently stops collecting.
