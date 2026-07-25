@@ -1,0 +1,44 @@
+app = "turf-exporter"
+primary_region = "arn"
+
+[build]
+
+[env]
+  TURF_LISTEN = ":8080"
+  TURF_DB_PATH = "/data/turf.db"
+  # Region 172, Hovedstaden.
+  TURF_TURF_COUNTRIES = "dk"
+  TURF_TURF_REGIONS = "172"
+  TURF_LOG_FORMAT = "json"
+  # Always tracked, whether or not they make the top list.
+  TURF_PLAYERS = "hula,Alanda"
+
+# SQLite lives here. 1 GB is far more than the takeover history needs; it is the
+# smallest size worth asking for.
+[[mounts]]
+  source = "turf_data"
+  destination = "/data"
+
+# Fly's managed Prometheus scrapes this over the private network, so no public
+# service is needed. Reach it locally with:  fly proxy 8080:8080
+[metrics]
+  port = 8080
+  path = "/metrics"
+
+# One machine, always on. The Turf API's rate limit is one request per second per
+# source, and the exporter's limiter assumes it is the only client — a second
+# machine would double the request rate and trip it. Never `fly scale count > 1`.
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+[deploy]
+  strategy = "immediate"
+
+# Uncomment to expose /metrics and the plain-text status page publicly.
+# [http_service]
+#   internal_port = 8080
+#   force_https = true
+#   auto_stop_machines = false
+#   auto_start_machines = false
+#   min_machines_running = 1

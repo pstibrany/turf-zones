@@ -1,2 +1,11 @@
 .claude/
 .DS_Store
+feed-capture/
+monitor_feeds.py
+
+# Go build output and local database
+/turf-zones
+/turf-exporter
+turf.db
+turf.db-wal
+turf.db-shm
