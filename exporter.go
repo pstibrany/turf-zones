@@ -1256,7 +1256,6 @@ type leaderRow struct {
 	Points        int64
 	PointsPerHour int64
 	Zones         int
-	Place         int64
 	Pinned        bool
 }
 
@@ -1295,7 +1294,7 @@ func (e *exporter) handleLeaderboard(w http.ResponseWriter, r *http.Request) {
 			rows = append(rows, leaderRow{
 				Position: pos, Name: s.User.Name, Points: s.User.Points,
 				PointsPerHour: s.User.PointsPerHour, Zones: len(s.User.Zones),
-				Place: s.User.Place, Pinned: s.Pinned,
+				Pinned: s.Pinned,
 			})
 		}
 		sort.SliceStable(rows, func(i, j int) bool {

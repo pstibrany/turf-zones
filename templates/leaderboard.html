@@ -138,7 +138,7 @@
         <table>
           <thead>
             <tr>
-              <th>#</th><th>Player</th><th>Points</th><th>PPH</th><th>Zones</th><th>Place</th>
+              <th>#</th><th>Player</th><th>Points</th><th>PPH</th><th>Zones</th>
             </tr>
           </thead>
           <tbody>
@@ -149,7 +149,6 @@
               <td class="points">{{ .Points }}</td>
               <td class="muted">{{ .PointsPerHour }}</td>
               <td>{{ .Zones }}</td>
-              <td class="muted">{{ if .Place }}{{ .Place }}{{ else }}—{{ end }}</td>
             </tr>
             {{ end }}
           </tbody>
