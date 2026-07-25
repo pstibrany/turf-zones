@@ -9,3 +9,5 @@ monitor_feeds.py
 turf.db
 turf.db-wal
 turf.db-shm
+
+token

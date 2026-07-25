@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"slices"
 	"sort"
 	"strconv"
@@ -929,19 +930,16 @@ func (e *exporter) pruneLoop(ctx context.Context) error {
 
 func (e *exporter) serve(ctx context.Context) error {
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.HandlerFor(e.registry, promhttp.HandlerOpts{
+	mux.Handle("/metrics", e.guardMetrics(promhttp.HandlerFor(e.registry, promhttp.HandlerOpts{
 		// Serve what we have rather than failing the scrape, but say so — a
 		// collector inconsistency is otherwise completely invisible.
 		ErrorHandling: promhttp.ContinueOnError,
 		ErrorLog:      gatherLogger{e.log},
-	}))
+	})))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("ok\n"))
 	})
-	// Only /api/* is guarded. /metrics stays open because Fly's managed
-	// Prometheus scrapes it over the private network and sends no auth header;
-	// requiring a token there would silently break metrics ingestion.
 	mux.Handle("/api/players", e.requireToken(http.HandlerFunc(e.handleAPIPlayers)))
 	mux.Handle("/api/history", e.requireToken(http.HandlerFunc(e.handleAPIHistory)))
 	mux.HandleFunc("/", e.handleIndex)
@@ -1030,6 +1028,56 @@ func (e *exporter) requireToken(next http.Handler) http.Handler {
 			return
 		}
 		next.ServeHTTP(w, r)
+	})
+}
+
+// flyPrivateNet is Fly's 6PN range. Machines, and Fly's own managed Prometheus
+// scraper, reach the app from inside it.
+var flyPrivateNet = netip.MustParsePrefix("fdaa::/16")
+
+// fromFlyPrivateNetwork reports whether a request arrived directly over the
+// private network rather than through fly-proxy.
+//
+// The source address alone cannot answer this: fly-proxy also connects from
+// inside 6PN, so public traffic looks internal by address. The discriminator is
+// that fly-proxy always attaches Fly-Client-IP to what it forwards. That is safe
+// to rely on from the outside in, because a public client cannot *remove* a
+// header the proxy adds — spoofing can only make a request look more public,
+// never more private.
+func fromFlyPrivateNetwork(r *http.Request) bool {
+	if r.Header.Get("Fly-Client-IP") != "" || r.Header.Get("X-Forwarded-For") != "" {
+		return false
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	return flyPrivateNet.Contains(addr.Unmap())
+}
+
+// guardMetrics requires a token for /metrics from the public internet while
+// leaving it open to the private network, so exposing the app publicly does not
+// hand out the metrics — and does not break Fly's managed Prometheus, which
+// scrapes over 6PN with no auth header.
+//
+// -metrics.require-token=false is the escape hatch: if the private-network
+// detection is ever wrong, metrics ingestion stops silently, and that is a bad
+// failure to have no switch for.
+func (e *exporter) guardMetrics(next http.Handler) http.Handler {
+	if e.cfg.APIToken == "" || !e.cfg.MetricsRequireToken {
+		return next
+	}
+	guarded := e.requireToken(next)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if fromFlyPrivateNetwork(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		guarded.ServeHTTP(w, r)
 	})
 }
 

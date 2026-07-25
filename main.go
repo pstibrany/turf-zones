@@ -37,6 +37,8 @@ type Config struct {
 	APIMaxRetries  int
 	APIToken       string
 
+	MetricsRequireToken bool
+
 	Countries stringList
 	Regions   stringList
 	Areas     stringList
@@ -87,8 +89,10 @@ func defaultConfig() Config {
 		// discovery scan, which is sequential: 16 tiles take ~80s.
 		APIMinInterval: 5 * time.Second,
 		APIMaxRetries:  4,
-		Countries:      stringList{"dk"},
-		Regions:        stringList{"172"},
+
+		MetricsRequireToken: true,
+		Countries:           stringList{"dk"},
+		Regions:             stringList{"172"},
 
 		ScanEnabled:  true,
 		Boxes:        bboxList{defaultCopenhagenBox},
@@ -128,6 +132,9 @@ func (c *Config) registerFlags(fs *flag.FlagSet) {
 	fs.IntVar(&c.APIMaxRetries, "api.max-retries", c.APIMaxRetries, "Retries after a failed Turf API request.")
 	fs.StringVar(&c.APIToken, "api.token", c.APIToken,
 		"Bearer token required on /api/* requests; empty leaves them open, which is fine while the app is only reachable privately. Prefer setting TURF_API_TOKEN in the environment — a command-line flag is visible in the process list. /metrics is never guarded, so Fly's Prometheus can still scrape it.")
+
+	fs.BoolVar(&c.MetricsRequireToken, "metrics.require-token", c.MetricsRequireToken,
+		"When an api.token is set, also require it for /metrics from the public internet. Requests arriving directly over Fly's private network are always allowed, so the managed Prometheus keeps scraping. Set false if that detection ever misfires.")
 
 	fs.Var(&c.Countries, "turf.countries", "Comma-separated country codes to monitor.")
 	fs.Var(&c.Regions, "turf.regions",

@@ -44,10 +44,17 @@ primary_region = "arn"
 [deploy]
   strategy = "immediate"
 
-# Uncomment to expose /metrics and the plain-text status page publicly.
-# [http_service]
-#   internal_port = 8080
-#   force_https = true
-#   auto_stop_machines = false
-#   auto_start_machines = false
-#   min_machines_running = 1
+# Public endpoint at https://turf-exporter.fly.dev. This exposes the whole port,
+# not selected paths, so /api/* is bearer-token guarded and /metrics requires the
+# token too unless the request arrives directly over the private network (which
+# is how Fly's managed Prometheus reaches it). The status page at / and /healthz
+# stay open — they only show public game data.
+#
+# auto_stop must stay false: this is a poller, not a request-driven service, and
+# a stopped machine silently stops collecting.
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = false
+  min_machines_running = 1
