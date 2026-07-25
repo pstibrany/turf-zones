@@ -79,6 +79,18 @@
     margin-left: 6px; vertical-align: 1px;
   }
 
+  /* Tabs are radio inputs and labels: no JavaScript, so switching between
+     Hovedstaden and Denmark costs nothing and works with the page cached. */
+  .tabstate { position: absolute; opacity: 0; pointer-events: none; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 10px; padding: 0 2px; }
+  .tabs label {
+    flex: 1; text-align: center; cursor: pointer; user-select: none;
+    padding: 8px 10px; border-radius: 10px; font-size: 13.5px; font-weight: 550;
+    color: var(--muted); background: var(--card); border: 1px solid var(--line);
+  }
+  .tabs label:active { transform: translateY(1px); }
+  .panel { display: none; }
+
   nav { margin-top: 14px; padding: 0 4px; font-size: 13px; display: flex; gap: 16px; }
   nav a { color: var(--accent); text-decoration: none; }
   nav a:hover { text-decoration: underline; }
@@ -91,38 +103,60 @@
     .pos { padding-left: 10px; }
     td:last-child { padding-right: 10px; }
   }
+
+  /* One rule per board, generated so this works for any number of tabs. */
+{{ range $i, $b := .Boards }}
+  #tab-{{ $i }}:checked ~ .tabs label[for="tab-{{ $i }}"] {
+    background: var(--accent); border-color: var(--accent); color: #fff;
+  }
+  #tab-{{ $i }}:checked ~ .panels #panel-{{ $i }} { display: block; }
+{{ end }}
 </style>
 </head>
 <body>
 <main>
   <header>
-    <h1>{{ .Region }}</h1>
+    <h1>Turf</h1>
     <div class="sub">Top {{ .TopN }} by {{ .RankBy }}{{ if .Pinned }} · tracking {{ .Pinned }}{{ end }}</div>
   </header>
 
-  <div class="card">
-    {{ if .Players }}
-    <table>
-      <thead>
-        <tr>
-          <th>#</th><th>Player</th><th>Points</th><th>PPH</th><th>Zones</th><th>Place</th>
-        </tr>
-      </thead>
-      <tbody>
-        {{ range .Players }}
-        <tr{{ if .Pinned }} class="pinned"{{ end }}>
-          <td class="pos">{{ if .Position }}{{ .Position }}{{ else }}—{{ end }}</td>
-          <td class="name"><a href="https://turfgame.com/user/{{ .Name }}" rel="noreferrer">{{ .Name }}</a></td>
-          <td class="points">{{ .Points }}</td>
-          <td class="muted">{{ .PointsPerHour }}</td>
-          <td>{{ .Zones }}</td>
-          <td class="muted">{{ if .Place }}{{ .Place }}{{ else }}—{{ end }}</td>
-        </tr>
+  {{ range $i, $b := .Boards }}
+  <input class="tabstate" type="radio" name="board" id="tab-{{ $i }}"{{ if eq $i 0 }} checked{{ end }} />
+  {{ end }}
+
+  <div class="tabs">
+    {{ range $i, $b := .Boards }}<label for="tab-{{ $i }}">{{ $b.Title }}</label>{{ end }}
+  </div>
+
+  <div class="panels">
+    {{ range $i, $b := .Boards }}
+    <div class="panel" id="panel-{{ $i }}">
+      <div class="card">
+        {{ if $b.Players }}
+        <table>
+          <thead>
+            <tr>
+              <th>#</th><th>Player</th><th>Points</th><th>PPH</th><th>Zones</th><th>Place</th>
+            </tr>
+          </thead>
+          <tbody>
+            {{ range $b.Players }}
+            <tr{{ if .Pinned }} class="pinned"{{ end }}>
+              <td class="pos">{{ if .Position }}{{ .Position }}{{ else }}—{{ end }}</td>
+              <td class="name"><a href="https://turfgame.com/user/{{ .Name }}" rel="noreferrer">{{ .Name }}</a></td>
+              <td class="points">{{ .Points }}</td>
+              <td class="muted">{{ .PointsPerHour }}</td>
+              <td>{{ .Zones }}</td>
+              <td class="muted">{{ if .Place }}{{ .Place }}{{ else }}—{{ end }}</td>
+            </tr>
+            {{ end }}
+          </tbody>
+        </table>
+        {{ else }}
+        <p class="empty">No players yet — the first discovery scan may still be running.</p>
         {{ end }}
-      </tbody>
-    </table>
-    {{ else }}
-    <p class="empty">No players yet — the first discovery scan may still be running.</p>
+      </div>
+    </div>
     {{ end }}
   </div>
 

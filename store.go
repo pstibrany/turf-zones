@@ -244,6 +244,37 @@ func (s *store) roster(ctx context.Context, since time.Time) ([]player, error) {
 	return out, rows.Err()
 }
 
+// forgetPlayers removes players entirely, along with any stats stored for them.
+// Used for visitors: someone registered elsewhere who happened to take a zone
+// here is discovered, checked once, and then dropped, so the roster stays the
+// size of the local player base instead of everyone who passed through. If they
+// turn up again they are simply re-checked — which is also how a genuine move
+// between regions gets noticed.
+func (s *store) forgetPlayers(ctx context.Context, ids []int64) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	list := placeholders(len(ids))
+	var removed int64
+	err := s.tx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`DELETE FROM players WHERE pinned = 0 AND id IN (`+list+`)`, args...)
+		if err != nil {
+			return err
+		}
+		removed, _ = res.RowsAffected()
+		_, err = tx.ExecContext(ctx,
+			`DELETE FROM player_stats WHERE player_id IN (`+list+`)
+			 AND player_id NOT IN (SELECT id FROM players)`, args...)
+		return err
+	})
+	return removed, err
+}
+
 // prunePlayers drops non-pinned players not seen since the cutoff.
 func (s *store) prunePlayers(ctx context.Context, before time.Time) (int64, error) {
 	res, err := s.db.ExecContext(ctx,

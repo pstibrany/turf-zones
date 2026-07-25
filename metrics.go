@@ -218,9 +218,10 @@ func boolLabel(b bool) string {
 // playerSample is everything exposed about one player at a point in time.
 type playerSample struct {
 	User User
-	// Position is the player's 1-based rank in the local top list, or 0 for a
-	// pinned player who did not make the cut.
-	Position int
+	// Positions maps board key to the player's 1-based rank on that board. A
+	// player can place on several (Hovedstaden and Denmark both), or on none if
+	// they are only here because they were pinned.
+	Positions map[string]int
 	// AreaZones is how many zones inside the monitored area the player held at
 	// the last discovery scan; -1 means there is no scan data yet.
 	AreaZones int
@@ -230,6 +231,18 @@ type playerSample struct {
 	// Pinned means the player is tracked by configuration rather than by rank.
 	Pinned    bool
 	UpdatedAt time.Time
+}
+
+// bestPosition is the player's highest placing across all boards, or a sentinel
+// that sorts last when they placed on none.
+func (s playerSample) bestPosition() int {
+	best := 1 << 30
+	for _, p := range s.Positions {
+		if p > 0 && p < best {
+			best = p
+		}
+	}
+	return best
 }
 
 var playerLabels = []string{"player", "player_id"}
@@ -245,10 +258,11 @@ type playerCollector struct {
 	mu      sync.RWMutex
 	samples []playerSample
 
-	values  []playerValue
-	updated *prometheus.Desc
-	info    *prometheus.Desc
-	descs   []*prometheus.Desc
+	values   []playerValue
+	position *prometheus.Desc
+	updated  *prometheus.Desc
+	info     *prometheus.Desc
+	descs    []*prometheus.Desc
 }
 
 type playerValue struct {
@@ -302,13 +316,15 @@ func newPlayerCollector() *playerCollector {
 	gauge("turf_player_place",
 		"The player's position on the global Turf leaderboard.",
 		func(s playerSample) (float64, bool) { return float64(s.User.Place), s.User.Place > 0 })
-	gauge("turf_player_top_position",
-		"The player's position in the monitored area's top list, 1 being highest. Absent for pinned players outside the list.",
-		func(s playerSample) (float64, bool) { return float64(s.Position), s.Position > 0 })
 	gauge("turf_player_area_zones",
 		"Zones inside the monitored area the player held at the last discovery scan.",
 		func(s playerSample) (float64, bool) { return float64(s.AreaZones), s.AreaZones >= 0 })
 
+	c.position = prometheus.NewDesc(
+		"turf_player_top_position",
+		"The player's position on a leaderboard, 1 being highest. Absent for pinned players who did not place.",
+		[]string{"player", "player_id", "board"}, nil)
+	c.descs = append(c.descs, c.position)
 	c.updated = prometheus.NewDesc(
 		"turf_player_stats_updated_timestamp_seconds",
 		"When this player's stats were last fetched.", playerLabels, nil)
@@ -342,17 +358,11 @@ func (c *playerCollector) snapshot() []playerSample {
 	c.mu.RUnlock()
 
 	sort.SliceStable(out, func(i, j int) bool {
-		pi, pj := out[i].Position, out[j].Position
-		switch {
-		case pi == pj:
-			return out[i].User.Points > out[j].User.Points
-		case pi == 0:
-			return false
-		case pj == 0:
-			return true
-		default:
+		pi, pj := out[i].bestPosition(), out[j].bestPosition()
+		if pi != pj {
 			return pi < pj
 		}
+		return out[i].User.Points > out[j].User.Points
 	})
 	return out
 }
@@ -377,6 +387,10 @@ func (c *playerCollector) Collect(ch chan<- prometheus.Metric) {
 			if f, ok := v.value(s); ok {
 				ch <- prometheus.MustNewConstMetric(v.desc, v.kind, f, name, id)
 			}
+		}
+		for boardKey, pos := range s.Positions {
+			ch <- prometheus.MustNewConstMetric(c.position, prometheus.GaugeValue,
+				float64(pos), name, id, boardKey)
 		}
 		if !s.UpdatedAt.IsZero() {
 			ch <- prometheus.MustNewConstMetric(c.updated, prometheus.GaugeValue,

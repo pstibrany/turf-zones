@@ -141,6 +141,90 @@ func (s areaSelector) matchesUser(u *User) bool {
 	return true
 }
 
+// board is one leaderboard tab. The game shows a region tab and a country tab
+// side by side, filtered differently, and a player can appear on both.
+type board struct {
+	Key   string // url/label safe: "hovedstaden", "denmark"
+	Title string
+	match func(*User) bool
+}
+
+// countryNames are the display names for the country codes this is likely to
+// meet. Anything else falls back to the upper-cased code.
+var countryNames = map[string]string{
+	"dk": "Denmark", "se": "Sweden", "no": "Norway", "fi": "Finland",
+	"de": "Germany", "gb": "United Kingdom", "nl": "Netherlands", "us": "United States",
+}
+
+// boards derives the leaderboards from the configured area: a region tab when
+// regions are configured, a country tab when countries are, both when both —
+// which mirrors the game's own tabs without needing separate configuration.
+func (s areaSelector) boards() []board {
+	var out []board
+	if len(s.regions) > 0 {
+		title := s.regionName
+		if title == "" {
+			title = "Region " + strings.Join(idLabels(s.regions, nil), "+")
+		}
+		regions := s.regions
+		out = append(out, board{
+			Key:   slug(title),
+			Title: title,
+			match: func(u *User) bool { return u.Region != nil && regions[u.Region.ID] },
+		})
+	}
+	if len(s.countries) > 0 {
+		codes := sortedKeys(s.countries)
+		titles := make([]string, len(codes))
+		for i, c := range codes {
+			if name, ok := countryNames[c]; ok {
+				titles[i] = name
+			} else {
+				titles[i] = strings.ToUpper(c)
+			}
+		}
+		title := strings.Join(titles, " + ")
+		countries := s.countries
+		out = append(out, board{
+			Key:   slug(title),
+			Title: title,
+			match: func(u *User) bool { return countries[strings.ToLower(u.Country)] },
+		})
+	}
+	if len(out) == 0 {
+		out = append(out, board{Key: "all", Title: "All players", match: func(*User) bool { return true }})
+	}
+	return out
+}
+
+// broadened drops the region and area constraints, keeping only countries. Used
+// for discovery: a country tab needs players from every region of that country,
+// not just the one the bounding box covers.
+func (s areaSelector) broadened() areaSelector {
+	if len(s.countries) == 0 {
+		return s
+	}
+	return areaSelector{countries: s.countries, summary: s.summary + " (discovery: country-wide)"}
+}
+
+// slug reduces a title to something safe for a URL fragment and a metric label.
+func slug(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == 'å', r == 'ä', r == 'æ':
+			b.WriteRune('a')
+		case r == 'ø', r == 'ö':
+			b.WriteRune('o')
+		case b.Len() > 0 && !strings.HasSuffix(b.String(), "-"):
+			b.WriteRune('-')
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
 // resolveSelector turns configuration into a selector. Regions and areas may be
 // given as numeric ids or as names ("Hovedstaden", "Københavns Kommune"); names
 // cost one GET /regions at startup, which also catches typos before they
@@ -295,6 +379,8 @@ type exporter struct {
 	areaZones atomic.Pointer[map[int64]int]
 
 	rank        rankBy
+	boards      []board
+	discovery   areaSelector
 	pinnedNames []string
 	pinnedIDs   []int64
 
@@ -374,6 +460,8 @@ func newExporter(ctx context.Context, cfg Config, log, events *slog.Logger) (*ex
 		players:     newPlayerCollector(),
 		registry:    registry,
 		rank:        rankBy(cfg.RankBy),
+		boards:      sel.boards(),
+		discovery:   sel.broadened(),
 		pinnedNames: names,
 		pinnedIDs:   ids,
 		firstScan:   make(chan struct{}),
@@ -386,6 +474,11 @@ func newExporter(ctx context.Context, cfg Config, log, events *slog.Logger) (*ex
 	// Never log the token itself, only whether there is one — otherwise the
 	// secret ends up in the log aggregator it was meant to be protected from.
 	e.log.Info("api endpoints configured", "authenticated", cfg.APIToken != "")
+	titles := make([]string, len(e.boards))
+	for i, b := range e.boards {
+		titles[i] = b.Title
+	}
+	e.log.Info("leaderboards", "boards", strings.Join(titles, ", "), "scope", string(cfg.RosterScope))
 	return e, nil
 }
 
@@ -511,7 +604,7 @@ func (e *exporter) pollFeed(ctx context.Context) error {
 		if !ok {
 			continue
 		}
-		monitoredEvent := e.sel.matches(ev.eventRegion())
+		monitoredEvent := e.discovery.matches(ev.eventRegion())
 		e.metrics.feedTakeovers.WithLabelValues(t.Country, boolLabel(monitoredEvent)).Inc()
 		inArea[keyOf(t)] = monitoredEvent
 
@@ -675,7 +768,7 @@ func (e *exporter) scanZones(ctx context.Context) error {
 				continue
 			}
 			seenZone[z.ID] = true
-			if !e.sel.matches(z.Region) {
+			if !e.discovery.matches(z.Region) {
 				outside++
 				continue
 			}
@@ -777,9 +870,6 @@ func (e *exporter) refreshStats(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := e.store.saveStats(ctx, users, now); err != nil {
-		return err
-	}
 	// Pinned players given by name only get their id here, once the API has
 	// resolved the name for us. This also adds them to pinned, so they are
 	// exposed on this cycle rather than the next one.
@@ -803,7 +893,8 @@ func (e *exporter) refreshStats(ctx context.Context) error {
 	// series with identical labels, which the registry drops while quietly
 	// counting an error on every scrape.
 	seen := make(map[int64]bool, len(users))
-	var visitors int
+	local := make([]User, 0, len(users))
+	var visitors []int64
 	for _, u := range users {
 		if u.ID == 0 {
 			continue // an unresolved name: the API omits it rather than erring
@@ -817,10 +908,11 @@ func (e *exporter) refreshStats(ctx context.Context) error {
 		// against locals buries the local leaderboard: nine of the top ten were
 		// Swedes passing through. Pinned players are exempt — they were asked for
 		// by name.
-		if e.cfg.RosterScope == scopeHome && !pinned[u.ID] && !e.sel.matchesUser(&u) {
-			visitors++
+		if e.cfg.RosterScope == scopeHome && !pinned[u.ID] && !e.matchesAnyBoard(&u) {
+			visitors = append(visitors, u.ID)
 			continue
 		}
+		local = append(local, u)
 		s := playerSample{
 			User:              u,
 			AreaZones:         -1,
@@ -833,6 +925,20 @@ func (e *exporter) refreshStats(ctx context.Context) error {
 		samples = append(samples, s)
 	}
 
+	if err := e.store.saveStats(ctx, local, now); err != nil {
+		return err
+	}
+	// Forget visitors rather than carrying them: 75 of 101 discovered players
+	// were registered elsewhere, so keeping them would quadruple every batch and
+	// grow the roster without bound.
+	if len(visitors) > 0 {
+		if n, err := e.store.forgetPlayers(ctx, visitors); err != nil {
+			e.log.Warn("could not drop visiting players", "err", err)
+		} else if n > 0 {
+			e.log.Debug("dropped visiting players", "count", n)
+		}
+	}
+
 	// Snapshot every player we fetched, not just the ones that rank: someone
 	// outside today's top 50 is exactly who you want history for when they climb.
 	e.recordHistory(ctx, samples, now)
@@ -842,9 +948,9 @@ func (e *exporter) refreshStats(ctx context.Context) error {
 	e.metrics.exposedPlayers.Set(float64(len(ranked)))
 	e.measureDB(ctx)
 
-	e.metrics.filteredPlayers.Set(float64(visitors))
+	e.metrics.filteredPlayers.Set(float64(len(visitors)))
 	e.log.Info("refreshed player stats", "roster", len(roster),
-		"fetched", len(users), "not_local", visitors,
+		"fetched", len(users), "visitors_dropped", len(visitors),
 		"exposed", len(ranked), "rank_by", string(e.rank))
 	return nil
 }
@@ -953,35 +1059,60 @@ func (e *exporter) recordPinned(ctx context.Context, users []User, pinned map[in
 	return e.store.seePlayers(ctx, owners, now, true)
 }
 
-// rankSamples orders players and keeps the top N, plus any pinned player that
-// did not make the cut (with position 0, so their series stay available without
-// claiming a place on the list).
+// rankSamples ranks players on every board and returns those worth exposing:
+// anyone who placed on at least one board, plus pinned players regardless.
+//
+// A player can hold a place on several boards at once — HappyF tops both
+// Hovedstaden and Denmark — so positions are per board rather than a single
+// number.
 func (e *exporter) rankSamples(samples []playerSample, pinned map[int64]bool) []playerSample {
 	value, ok := rankFuncs[e.rank]
 	if !ok {
 		value = rankFuncs["points"]
 	}
-	sort.SliceStable(samples, func(i, j int) bool {
-		vi, vj := value(samples[i]), value(samples[j])
-		if vi != vj {
-			return vi > vj
-		}
-		return samples[i].User.ID < samples[j].User.ID // stable tie-break
-	})
 
-	out := make([]playerSample, 0, min(len(samples), e.cfg.TopN)+len(pinned))
+	placed := make(map[int64]bool)
+	for _, b := range e.boards {
+		ranked := make([]*playerSample, 0, len(samples))
+		for i := range samples {
+			if b.match(&samples[i].User) {
+				ranked = append(ranked, &samples[i])
+			}
+		}
+		sort.SliceStable(ranked, func(i, j int) bool {
+			vi, vj := value(*ranked[i]), value(*ranked[j])
+			if vi != vj {
+				return vi > vj
+			}
+			return ranked[i].User.ID < ranked[j].User.ID // stable tie-break
+		})
+		for i, s := range ranked {
+			if i >= e.cfg.TopN {
+				break
+			}
+			if s.Positions == nil {
+				s.Positions = make(map[string]int, len(e.boards))
+			}
+			s.Positions[b.Key] = i + 1
+			placed[s.User.ID] = true
+		}
+	}
+
+	out := make([]playerSample, 0, len(samples))
 	for i := range samples {
 		s := samples[i]
 		s.Pinned = pinned[s.User.ID]
-		inTop := i < e.cfg.TopN
-		if inTop {
-			s.Position = i + 1
-		}
-		if inTop || pinned[s.User.ID] {
+		if placed[s.User.ID] || s.Pinned {
 			out = append(out, s)
 		}
 	}
 	return out
+}
+
+// matchesAnyBoard reports whether a player belongs on any leaderboard, which is
+// the test roster.scope=home applies.
+func (e *exporter) matchesAnyBoard(u *User) bool {
+	return slices.ContainsFunc(e.boards, func(b board) bool { return b.match(u) })
 }
 
 // ---------------------------------------------------------------------------
@@ -1109,7 +1240,7 @@ func (e *exporter) serve(ctx context.Context, name, address string, handler http
 	}
 }
 
-// leaderRow is one row of the leaderboard page.
+// leaderRow is one row of a leaderboard tab.
 type leaderRow struct {
 	Position      int
 	Name          string
@@ -1120,33 +1251,65 @@ type leaderRow struct {
 	Pinned        bool
 }
 
-// handleLeaderboard renders the current top list. The snapshot it reads is the
-// same one /metrics serves, so the page cannot disagree with the metrics.
+// boardView is one rendered tab.
+type boardView struct {
+	Key     string
+	Title   string
+	Players []leaderRow
+}
+
+// handleLeaderboard renders one tab per board. The snapshot it reads is the same
+// one /metrics serves, so the page cannot disagree with the metrics.
 func (e *exporter) handleLeaderboard(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
 		return
 	}
 	samples := e.players.snapshot()
-	rows := make([]leaderRow, 0, len(samples))
 	updated := time.Time{}
 	for _, s := range samples {
-		rows = append(rows, leaderRow{
-			Position: s.Position, Name: s.User.Name, Points: s.User.Points,
-			PointsPerHour: s.User.PointsPerHour, Zones: len(s.User.Zones),
-			Place: s.User.Place, Pinned: s.Pinned,
-		})
 		if s.UpdatedAt.After(updated) {
 			updated = s.UpdatedAt
 		}
 	}
 
+	views := make([]boardView, 0, len(e.boards))
+	for _, b := range e.boards {
+		rows := make([]leaderRow, 0, e.cfg.TopN)
+		for _, s := range samples {
+			pos, placed := s.Positions[b.Key]
+			// A pinned player is shown on every tab they could belong to, even
+			// unplaced — that is the point of pinning them.
+			if !placed && !(s.Pinned && b.match(&s.User)) {
+				continue
+			}
+			rows = append(rows, leaderRow{
+				Position: pos, Name: s.User.Name, Points: s.User.Points,
+				PointsPerHour: s.User.PointsPerHour, Zones: len(s.User.Zones),
+				Place: s.User.Place, Pinned: s.Pinned,
+			})
+		}
+		sort.SliceStable(rows, func(i, j int) bool {
+			pi, pj := rows[i].Position, rows[j].Position
+			switch {
+			case pi == pj:
+				return rows[i].Points > rows[j].Points
+			case pi == 0:
+				return false // unplaced sinks to the bottom
+			case pj == 0:
+				return true
+			default:
+				return pi < pj
+			}
+		})
+		views = append(views, boardView{Key: b.Key, Title: b.Title, Players: rows})
+	}
+
 	e.renderPage(w, "leaderboard.html", map[string]any{
-		"Region":  e.regionTitle(),
+		"Boards":  views,
 		"RankBy":  rankLabel(e.rank),
 		"TopN":    e.cfg.TopN,
 		"Pinned":  strings.Join(e.cfg.Players, ", "),
-		"Players": rows,
 		"Updated": relativeTime(updated),
 	})
 }
@@ -1323,21 +1486,21 @@ func (e *exporter) requireToken(next http.Handler) http.Handler {
 
 // apiPlayer is the current-standings row served by /api/players.
 type apiPlayer struct {
-	Player            string     `json:"player"`
-	PlayerID          int64      `json:"player_id"`
-	Position          *int       `json:"top_position"`
-	Points            int64      `json:"points"`
-	PointsPerHour     int64      `json:"points_per_hour"`
-	Zones             int        `json:"zones"`
-	AreaZones         *int       `json:"area_zones"`
-	Takeovers         int64      `json:"takeovers"`
-	ObservedTakeovers int64      `json:"observed_takeovers"`
-	TotalPoints       int64      `json:"total_points"`
-	Place             int64      `json:"place"`
-	Rank              int64      `json:"rank"`
-	Country           string     `json:"country"`
-	Region            string     `json:"region"`
-	Updated           *time.Time `json:"updated"`
+	Player            string         `json:"player"`
+	PlayerID          int64          `json:"player_id"`
+	Positions         map[string]int `json:"positions"`
+	Points            int64          `json:"points"`
+	PointsPerHour     int64          `json:"points_per_hour"`
+	Zones             int            `json:"zones"`
+	AreaZones         *int           `json:"area_zones"`
+	Takeovers         int64          `json:"takeovers"`
+	ObservedTakeovers int64          `json:"observed_takeovers"`
+	TotalPoints       int64          `json:"total_points"`
+	Place             int64          `json:"place"`
+	Rank              int64          `json:"rank"`
+	Country           string         `json:"country"`
+	Region            string         `json:"region"`
+	Updated           *time.Time     `json:"updated"`
 }
 
 // handleAPIPlayers serves the current top list as a flat JSON array, the shape
@@ -1352,12 +1515,11 @@ func (e *exporter) handleAPIPlayers(w http.ResponseWriter, r *http.Request) {
 			ObservedTakeovers: s.ObservedTakeovers, TotalPoints: s.User.TotalPoints,
 			Place: s.User.Place, Rank: s.User.Rank, Country: s.User.Country,
 		}
-		// Null rather than a sentinel: a pinned player has no position, and an
-		// unscanned player has no area zone count. Charting either as 0 would be
-		// a lie.
-		if s.Position > 0 {
-			pos := s.Position
-			p.Position = &pos
+		// Positions is keyed by board, so a player topping both Hovedstaden and
+		// Denmark reports both. Empty for a pinned player who placed on neither.
+		p.Positions = s.Positions
+		if p.Positions == nil {
+			p.Positions = map[string]int{}
 		}
 		if s.AreaZones >= 0 {
 			az := s.AreaZones
