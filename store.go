@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go driver: no cgo, so the binary stays static
@@ -86,6 +87,28 @@ var migrations = []string{
 		key   TEXT PRIMARY KEY,
 		value TEXT NOT NULL
 	);
+	`,
+	// 2: player stat history. player_stats only ever holds the latest row per
+	// player, so everything older was being discarded; this keeps a periodic
+	// snapshot so trends outlive any Prometheus retention window.
+	`
+	CREATE TABLE player_history (
+		ts                 INTEGER NOT NULL,
+		player_id          INTEGER NOT NULL,
+		name               TEXT    NOT NULL,
+		points             INTEGER,
+		points_per_hour    INTEGER,
+		total_points       INTEGER,
+		place              INTEGER,
+		rank               INTEGER,
+		taken              INTEGER,
+		unique_zones_taken INTEGER,
+		zones              INTEGER,
+		area_zones         INTEGER,
+		PRIMARY KEY (ts, player_id)
+	);
+	CREATE INDEX player_history_player ON player_history(player_id, ts);
+	CREATE INDEX player_history_ts ON player_history(ts);
 	`,
 }
 
@@ -454,6 +477,153 @@ func (s *store) loadStats(ctx context.Context) ([]playerSample, error) {
 		out = append(out, s)
 	}
 	return out, rows.Err()
+}
+
+// insertHistory records a snapshot of each player at the given bucket time.
+// The primary key on (ts, player_id) makes this idempotent: stats refresh more
+// often than snapshots are wanted, so every refresh within the same bucket
+// simply writes nothing. That means no separate "when did I last snapshot"
+// state to keep, and it survives restarts for free. Returns how many rows were
+// new.
+func (s *store) insertHistory(ctx context.Context, samples []playerSample, bucket time.Time) (int, error) {
+	if len(samples) == 0 {
+		return 0, nil
+	}
+	written := 0
+	err := s.tx(ctx, func(tx *sql.Tx) error {
+		stmt, err := tx.PrepareContext(ctx, `
+			INSERT OR IGNORE INTO player_history (
+				ts, player_id, name, points, points_per_hour, total_points,
+				place, rank, taken, unique_zones_taken, zones, area_zones
+			) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+		if err != nil {
+			return err
+		}
+		defer stmt.Close()
+		ts := bucket.Unix()
+		for _, p := range samples {
+			if p.User.ID == 0 {
+				continue
+			}
+			// -1 means "no scan data yet"; store it as NULL rather than as a
+			// number that would average into charts as if it were real.
+			var areaZones any
+			if p.AreaZones >= 0 {
+				areaZones = p.AreaZones
+			}
+			res, err := stmt.ExecContext(ctx, ts, p.User.ID, p.User.Name,
+				p.User.Points, p.User.PointsPerHour, p.User.TotalPoints,
+				p.User.Place, p.User.Rank, p.User.Taken, p.User.UniqueZonesTaken,
+				len(p.User.Zones), areaZones)
+			if err != nil {
+				return fmt.Errorf("insert history for %d: %w", p.User.ID, err)
+			}
+			if n, err := res.RowsAffected(); err == nil && n > 0 {
+				written++
+			}
+		}
+		return nil
+	})
+	return written, err
+}
+
+// historyRow is one stored snapshot.
+type historyRow struct {
+	Time             time.Time `json:"time"`
+	PlayerID         int64     `json:"player_id"`
+	Name             string    `json:"player"`
+	Points           int64     `json:"points"`
+	PointsPerHour    int64     `json:"points_per_hour"`
+	TotalPoints      int64     `json:"total_points"`
+	Place            int64     `json:"place"`
+	Rank             int64     `json:"rank"`
+	Taken            int64     `json:"takeovers"`
+	UniqueZonesTaken int64     `json:"unique_zones_taken"`
+	Zones            int64     `json:"zones"`
+	AreaZones        *int64    `json:"area_zones"`
+}
+
+// historyQuery selects a slice of history.
+type historyQuery struct {
+	From      time.Time
+	To        time.Time
+	PlayerIDs []int64
+	Names     []string
+	Limit     int
+}
+
+// queryHistory returns snapshots matching the query, oldest first. An empty
+// PlayerIDs and Names means every player.
+func (s *store) queryHistory(ctx context.Context, q historyQuery) ([]historyRow, error) {
+	sb := strings.Builder{}
+	sb.WriteString(`
+		SELECT ts, player_id, name, points, points_per_hour, total_points,
+		       place, rank, taken, unique_zones_taken, zones, area_zones
+		FROM player_history WHERE ts >= ? AND ts <= ?`)
+	args := []any{q.From.Unix(), q.To.Unix()}
+
+	if len(q.PlayerIDs) > 0 || len(q.Names) > 0 {
+		var clauses []string
+		if len(q.PlayerIDs) > 0 {
+			clauses = append(clauses, "player_id IN ("+placeholders(len(q.PlayerIDs))+")")
+			for _, id := range q.PlayerIDs {
+				args = append(args, id)
+			}
+		}
+		if len(q.Names) > 0 {
+			clauses = append(clauses, "name COLLATE NOCASE IN ("+placeholders(len(q.Names))+")")
+			for _, n := range q.Names {
+				args = append(args, n)
+			}
+		}
+		sb.WriteString(" AND (" + strings.Join(clauses, " OR ") + ")")
+	}
+	sb.WriteString(" ORDER BY ts ASC, player_id ASC LIMIT ?")
+	args = append(args, q.Limit)
+
+	rows, err := s.db.QueryContext(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("query history: %w", err)
+	}
+	defer rows.Close()
+
+	out := []historyRow{}
+	for rows.Next() {
+		var r historyRow
+		var ts int64
+		var areaZones sql.NullInt64
+		if err := rows.Scan(&ts, &r.PlayerID, &r.Name, &r.Points, &r.PointsPerHour,
+			&r.TotalPoints, &r.Place, &r.Rank, &r.Taken, &r.UniqueZonesTaken,
+			&r.Zones, &areaZones); err != nil {
+			return nil, err
+		}
+		r.Time = time.Unix(ts, 0).UTC()
+		if areaZones.Valid {
+			r.AreaZones = &areaZones.Int64
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// pruneHistory deletes snapshots older than the cutoff.
+func (s *store) pruneHistory(ctx context.Context, before time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM player_history WHERE ts < ?`, before.Unix())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// countHistory returns the number of stored snapshot rows.
+func (s *store) countHistory(ctx context.Context) (int64, error) {
+	var n int64
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM player_history`).Scan(&n)
+	return n, err
+}
+
+func placeholders(n int) string {
+	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
 }
 
 // getMetaTime reads a timestamp from the meta table.

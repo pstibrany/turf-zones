@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -742,6 +743,10 @@ func (e *exporter) refreshStats(ctx context.Context) error {
 		samples = append(samples, s)
 	}
 
+	// Snapshot every player we fetched, not just the ones that rank: someone
+	// outside today's top 50 is exactly who you want history for when they climb.
+	e.recordHistory(ctx, samples, now)
+
 	ranked := e.rankSamples(samples, pinned)
 	e.players.set(ranked)
 	e.metrics.exposedPlayers.Set(float64(len(ranked)))
@@ -749,6 +754,30 @@ func (e *exporter) refreshStats(ctx context.Context) error {
 	e.log.Info("refreshed player stats", "roster", len(roster),
 		"fetched", len(users), "exposed", len(ranked), "rank_by", string(e.rank))
 	return nil
+}
+
+// recordHistory writes a snapshot for the current time bucket. Failing to store
+// history should not fail the refresh — the metrics are the primary product.
+func (e *exporter) recordHistory(ctx context.Context, samples []playerSample, now time.Time) {
+	if e.cfg.HistoryInterval <= 0 {
+		return
+	}
+	bucket := now.Truncate(e.cfg.HistoryInterval).UTC()
+	written, err := e.store.insertHistory(ctx, samples, bucket)
+	if err != nil {
+		e.log.Error("could not store player history", "err", err)
+		e.metrics.historyWrites.WithLabelValues("error").Inc()
+		return
+	}
+	e.metrics.historyWrites.WithLabelValues("success").Inc()
+	if written > 0 {
+		e.metrics.historyRows.Add(float64(written))
+		e.log.Info("stored player history snapshot",
+			"bucket", bucket.Format(time.RFC3339), "rows", written)
+	}
+	if total, err := e.store.countHistory(ctx); err == nil {
+		e.metrics.historyStored.Set(float64(total))
+	}
 }
 
 // userRefs builds the POST /users body: every roster player by id, plus pinned
@@ -873,6 +902,18 @@ func (e *exporter) pruneLoop(ctx context.Context) error {
 		if orphans > 0 {
 			e.log.Info("pruned stats for departed players", "rows", orphans)
 		}
+		// History is pruned by age only, deliberately not by roster membership:
+		// the point of keeping it is to still have the trend after someone stops
+		// playing.
+		if e.cfg.HistoryRetention > 0 {
+			h, err := e.store.pruneHistory(ctx, now.Add(-e.cfg.HistoryRetention))
+			if err != nil {
+				return err
+			}
+			if h > 0 {
+				e.log.Info("pruned expired player history", "rows", h)
+			}
+		}
 		return nil
 	})
 }
@@ -893,6 +934,8 @@ func (e *exporter) serve(ctx context.Context) error {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("ok\n"))
 	})
+	mux.HandleFunc("/api/players", e.handleAPIPlayers)
+	mux.HandleFunc("/api/history", e.handleAPIHistory)
 	mux.HandleFunc("/", e.handleIndex)
 
 	srv := &http.Server{
@@ -955,6 +998,166 @@ func (e *exporter) handleIndex(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(tw, "(no players yet — the first discovery scan may still be running)")
 	}
 	_ = tw.Flush()
+}
+
+// apiPlayer is the current-standings row served by /api/players.
+type apiPlayer struct {
+	Player            string     `json:"player"`
+	PlayerID          int64      `json:"player_id"`
+	Position          *int       `json:"top_position"`
+	Points            int64      `json:"points"`
+	PointsPerHour     int64      `json:"points_per_hour"`
+	Zones             int        `json:"zones"`
+	AreaZones         *int       `json:"area_zones"`
+	Takeovers         int64      `json:"takeovers"`
+	ObservedTakeovers int64      `json:"observed_takeovers"`
+	TotalPoints       int64      `json:"total_points"`
+	Place             int64      `json:"place"`
+	Rank              int64      `json:"rank"`
+	Country           string     `json:"country"`
+	Region            string     `json:"region"`
+	Updated           *time.Time `json:"updated"`
+}
+
+// handleAPIPlayers serves the current top list as a flat JSON array, the shape
+// Grafana's Infinity datasource consumes without any parsing configuration.
+func (e *exporter) handleAPIPlayers(w http.ResponseWriter, r *http.Request) {
+	out := []apiPlayer{}
+	for _, s := range e.players.snapshot() {
+		p := apiPlayer{
+			Player: s.User.Name, PlayerID: s.User.ID,
+			Points: s.User.Points, PointsPerHour: s.User.PointsPerHour,
+			Zones: len(s.User.Zones), Takeovers: s.User.Taken,
+			ObservedTakeovers: s.ObservedTakeovers, TotalPoints: s.User.TotalPoints,
+			Place: s.User.Place, Rank: s.User.Rank, Country: s.User.Country,
+		}
+		// Null rather than a sentinel: a pinned player has no position, and an
+		// unscanned player has no area zone count. Charting either as 0 would be
+		// a lie.
+		if s.Position > 0 {
+			pos := s.Position
+			p.Position = &pos
+		}
+		if s.AreaZones >= 0 {
+			az := s.AreaZones
+			p.AreaZones = &az
+		}
+		if s.User.Region != nil {
+			p.Region = s.User.Region.Name
+		}
+		if !s.UpdatedAt.IsZero() {
+			t := s.UpdatedAt.UTC()
+			p.Updated = &t
+		}
+		out = append(out, p)
+	}
+	writeJSON(w, r, e.log, out)
+}
+
+// handleAPIHistory serves stored snapshots as a flat JSON array, oldest first.
+//
+// Parameters: from/to (RFC3339, Unix seconds, or a negative Go duration such as
+// -7d... expressed as -168h), player (repeatable or comma-separated names),
+// player_id (likewise), and limit.
+func (e *exporter) handleAPIHistory(w http.ResponseWriter, r *http.Request) {
+	now := time.Now()
+	q := historyQuery{
+		From:  now.Add(-7 * 24 * time.Hour),
+		To:    now,
+		Limit: 10000,
+	}
+
+	if v := r.URL.Query().Get("from"); v != "" {
+		t, err := parseTimeParam(v, now)
+		if err != nil {
+			httpError(w, http.StatusBadRequest, "from: %v", err)
+			return
+		}
+		q.From = t
+	}
+	if v := r.URL.Query().Get("to"); v != "" {
+		t, err := parseTimeParam(v, now)
+		if err != nil {
+			httpError(w, http.StatusBadRequest, "to: %v", err)
+			return
+		}
+		q.To = t
+	}
+	if q.To.Before(q.From) {
+		httpError(w, http.StatusBadRequest, "to (%s) is before from (%s)",
+			q.To.Format(time.RFC3339), q.From.Format(time.RFC3339))
+		return
+	}
+	if v := r.URL.Query().Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			httpError(w, http.StatusBadRequest, "limit must be a positive integer")
+			return
+		}
+		q.Limit = min(n, 200000)
+	}
+	q.Names = splitParams(r.URL.Query()["player"])
+	for _, s := range splitParams(r.URL.Query()["player_id"]) {
+		id, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			httpError(w, http.StatusBadRequest, "player_id %q is not a number", s)
+			return
+		}
+		q.PlayerIDs = append(q.PlayerIDs, id)
+	}
+
+	rows, err := e.store.queryHistory(r.Context(), q)
+	if err != nil {
+		e.log.Error("history query failed", "err", err)
+		httpError(w, http.StatusInternalServerError, "query failed")
+		return
+	}
+	writeJSON(w, r, e.log, rows)
+}
+
+// parseTimeParam accepts RFC3339, Unix seconds, or a Go duration relative to
+// now ("-24h"), which is what makes the endpoint pleasant to curl.
+func parseTimeParam(v string, now time.Time) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339, v); err == nil {
+		return t, nil
+	}
+	if secs, err := strconv.ParseInt(v, 10, 64); err == nil {
+		return time.Unix(secs, 0), nil
+	}
+	if d, err := time.ParseDuration(v); err == nil {
+		return now.Add(d), nil
+	}
+	return time.Time{}, fmt.Errorf("want RFC3339, Unix seconds, or a duration like -24h; got %q", v)
+}
+
+// splitParams flattens repeated and comma-separated query parameters.
+func splitParams(values []string) []string {
+	var out []string
+	for _, v := range values {
+		for _, part := range strings.Split(v, ",") {
+			if part = strings.TrimSpace(part); part != "" {
+				out = append(out, part)
+			}
+		}
+	}
+	return out
+}
+
+func writeJSON(w http.ResponseWriter, r *http.Request, log *slog.Logger, v any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	enc := json.NewEncoder(w)
+	if r.URL.Query().Get("pretty") != "" {
+		enc.SetIndent("", "  ")
+	}
+	if err := enc.Encode(v); err != nil {
+		log.Warn("writing json response", "err", err)
+	}
+}
+
+func httpError(w http.ResponseWriter, code int, format string, args ...any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf(format, args...)})
 }
 
 // ---------------------------------------------------------------------------

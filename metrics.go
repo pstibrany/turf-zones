@@ -35,6 +35,10 @@ type opsMetrics struct {
 	refreshes   *prometheus.CounterVec
 	refreshTime prometheus.Gauge
 
+	historyWrites *prometheus.CounterVec
+	historyRows   prometheus.Counter
+	historyStored prometheus.Gauge
+
 	scans     *prometheus.CounterVec
 	scanTime  prometheus.Gauge
 	scanTiles prometheus.Gauge
@@ -103,6 +107,19 @@ func newOpsMetrics(reg prometheus.Registerer) *opsMetrics {
 		refreshTime: f.gauge(prometheus.GaugeOpts{
 			Name: "turf_stats_last_success_timestamp_seconds",
 			Help: "When the player stats were last refreshed successfully.",
+		}),
+
+		historyWrites: f.counterVec(prometheus.CounterOpts{
+			Name: "turf_history_writes_total",
+			Help: "Attempts to store a player history snapshot, by outcome.",
+		}, "outcome"),
+		historyRows: f.counter(prometheus.CounterOpts{
+			Name: "turf_history_rows_written_total",
+			Help: "Player history rows actually inserted; zero when the current time bucket is already recorded.",
+		}),
+		historyStored: f.gauge(prometheus.GaugeOpts{
+			Name: "turf_history_rows",
+			Help: "Player history rows currently in the database.",
 		}),
 
 		scans: f.counterVec(prometheus.CounterOpts{

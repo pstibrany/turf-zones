@@ -60,6 +60,9 @@ type Config struct {
 	RankBy        string
 	Players       stringList
 
+	HistoryInterval  time.Duration
+	HistoryRetention time.Duration
+
 	DBPath            string
 	TakeoverRetention time.Duration
 	PruneInterval     time.Duration
@@ -103,6 +106,9 @@ func defaultConfig() Config {
 		RosterTTL:     7 * 24 * time.Hour,
 		TopN:          50,
 		RankBy:        "points",
+
+		HistoryInterval:  time.Hour,
+		HistoryRetention: 90 * 24 * time.Hour,
 
 		DBPath:            "turf.db",
 		TakeoverRetention: 90 * 24 * time.Hour,
@@ -154,6 +160,11 @@ func (c *Config) registerFlags(fs *flag.FlagSet) {
 	fs.StringVar(&c.RankBy, "top.by", c.RankBy, "Stat the top list is ranked by: "+rankByValues()+".")
 	fs.Var(&c.Players, "players",
 		"Comma-separated player names or ids to always track, whether or not they make the top list.")
+
+	fs.DurationVar(&c.HistoryInterval, "history.interval", c.HistoryInterval,
+		"How often to append a player stats snapshot to the database. Snapshots are bucketed to this interval, so refreshes in between write nothing. Zero disables history.")
+	fs.DurationVar(&c.HistoryRetention, "history.retention", c.HistoryRetention,
+		"How long to keep player history snapshots. Zero keeps them forever.")
 
 	fs.StringVar(&c.DBPath, "db.path", c.DBPath, "Path to the SQLite database. It is created if missing.")
 	fs.DurationVar(&c.TakeoverRetention, "db.takeover-retention", c.TakeoverRetention, "How long to keep stored takeovers.")
