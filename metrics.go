@@ -29,6 +29,7 @@ type opsMetrics struct {
 	feedCursor    prometheus.Gauge
 
 	rosterPlayers   prometheus.Gauge
+	filteredPlayers prometheus.Gauge
 	exposedPlayers  prometheus.Gauge
 	storedTakeovers prometheus.Gauge
 
@@ -93,6 +94,10 @@ func newOpsMetrics(reg prometheus.Registerer) *opsMetrics {
 		rosterPlayers: f.gauge(prometheus.GaugeOpts{
 			Name: "turf_roster_players",
 			Help: "Players discovered in the monitored area and still within the roster retention window.",
+		}),
+		filteredPlayers: f.gauge(prometheus.GaugeOpts{
+			Name: "turf_non_local_players",
+			Help: "Players discovered in the area but excluded from the leaderboard because they are registered elsewhere (roster.scope=home).",
 		}),
 		exposedPlayers: f.gauge(prometheus.GaugeOpts{
 			Name: "turf_exposed_players",

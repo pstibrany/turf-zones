@@ -58,6 +58,7 @@ type Config struct {
 
 	StatsInterval time.Duration
 	RosterTTL     time.Duration
+	RosterScope   rosterScope
 	TopN          int
 	RankBy        string
 	Players       stringList
@@ -107,6 +108,7 @@ func defaultConfig() Config {
 
 		StatsInterval: 10 * time.Minute,
 		RosterTTL:     7 * 24 * time.Hour,
+		RosterScope:   scopeHome,
 		TopN:          50,
 		RankBy:        "points",
 
@@ -164,6 +166,8 @@ func (c *Config) registerFlags(fs *flag.FlagSet) {
 	fs.DurationVar(&c.StatsInterval, "stats.interval", c.StatsInterval, "How often to refresh player stats.")
 	fs.DurationVar(&c.RosterTTL, "roster.ttl", c.RosterTTL,
 		"How long a player stays on the roster after we last saw them active in the area.")
+	fs.Var(rosterScopeValue{&c.RosterScope}, "roster.scope",
+		"Who appears on the leaderboard. 'home' lists players registered to the monitored region, reproducing the game's own regional ranking. 'area' instead lists whoever holds or takes zones here, which surfaces visitors carrying their whole national score.")
 	fs.IntVar(&c.TopN, "top.n", c.TopN, "How many players to expose as metrics.")
 	fs.StringVar(&c.RankBy, "top.by", c.RankBy, "Stat the top list is ranked by: "+rankByValues()+".")
 	fs.Var(&c.Players, "players",
@@ -186,6 +190,9 @@ func (c *Config) validate() error {
 	}
 	if !rankBy(c.RankBy).valid() {
 		return fmt.Errorf("top.by must be one of %s, got %q", rankByValues(), c.RankBy)
+	}
+	if !c.RosterScope.valid() {
+		return fmt.Errorf("roster.scope must be home or area, got %q", c.RosterScope)
 	}
 	if c.TopN <= 0 {
 		return fmt.Errorf("top.n must be positive, got %d", c.TopN)
@@ -396,6 +403,25 @@ func (l *bboxList) Set(s string) error {
 		}
 		*l = append(*l, b)
 	}
+	return nil
+}
+
+// rosterScopeValue adapts rosterScope to flag.Value.
+type rosterScopeValue struct{ target *rosterScope }
+
+func (v rosterScopeValue) String() string {
+	if v.target == nil {
+		return ""
+	}
+	return string(*v.target)
+}
+
+func (v rosterScopeValue) Set(s string) error {
+	rs := rosterScope(strings.ToLower(strings.TrimSpace(s)))
+	if !rs.valid() {
+		return fmt.Errorf("must be home or area")
+	}
+	*v.target = rs
 	return nil
 }
 

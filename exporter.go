@@ -50,6 +50,22 @@ var pageTemplates = template.Must(template.ParseFS(templateFS, "templates/*.html
 // Monitored area
 // ---------------------------------------------------------------------------
 
+// rosterScope decides who belongs on the leaderboard.
+//
+// scopeHome reproduces the game's own regional list: everyone registered to the
+// region, ranked by round points. scopeArea instead ranks whoever is holding or
+// taking ground here, which is a different and occasionally more interesting
+// question — but it is not what the game shows, because a visitor arrives
+// carrying every point they have earned elsewhere.
+type rosterScope string
+
+const (
+	scopeHome rosterScope = "home"
+	scopeArea rosterScope = "area"
+)
+
+func (r rosterScope) valid() bool { return r == scopeHome || r == scopeArea }
+
 // scope selects how much of the global feed a stage cares about.
 type scope string
 
@@ -103,6 +119,24 @@ func (s areaSelector) matches(r *Region) bool {
 	}
 	if len(s.areas) > 0 && !s.areas[r.areaID()] {
 		return false
+	}
+	return true
+}
+
+// matchesUser tests a player's own registration rather than where their zones
+// are, which is how the game builds its leaderboards.
+//
+// The two tabs filter differently, and this mirrors that: the region tab lists
+// everyone whose home region is that region, whatever their country — Hovedstaden
+// includes a German and a Swede — while the country tab filters on country and
+// drops both of them. So when regions are configured they decide alone, and
+// country only applies when no region was given.
+func (s areaSelector) matchesUser(u *User) bool {
+	if len(s.regions) > 0 {
+		return u.Region != nil && s.regions[u.Region.ID]
+	}
+	if len(s.countries) > 0 {
+		return s.countries[strings.ToLower(u.Country)]
 	}
 	return true
 }
@@ -769,6 +803,7 @@ func (e *exporter) refreshStats(ctx context.Context) error {
 	// series with identical labels, which the registry drops while quietly
 	// counting an error on every scrape.
 	seen := make(map[int64]bool, len(users))
+	var visitors int
 	for _, u := range users {
 		if u.ID == 0 {
 			continue // an unresolved name: the API omits it rather than erring
@@ -777,6 +812,15 @@ func (e *exporter) refreshStats(ctx context.Context) error {
 			continue
 		}
 		seen[u.ID] = true
+		// Discovery finds whoever holds or takes a zone here, which includes
+		// visitors from abroad carrying their whole national score. Ranking those
+		// against locals buries the local leaderboard: nine of the top ten were
+		// Swedes passing through. Pinned players are exempt — they were asked for
+		// by name.
+		if e.cfg.RosterScope == scopeHome && !pinned[u.ID] && !e.sel.matchesUser(&u) {
+			visitors++
+			continue
+		}
 		s := playerSample{
 			User:              u,
 			AreaZones:         -1,
@@ -798,8 +842,10 @@ func (e *exporter) refreshStats(ctx context.Context) error {
 	e.metrics.exposedPlayers.Set(float64(len(ranked)))
 	e.measureDB(ctx)
 
+	e.metrics.filteredPlayers.Set(float64(visitors))
 	e.log.Info("refreshed player stats", "roster", len(roster),
-		"fetched", len(users), "exposed", len(ranked), "rank_by", string(e.rank))
+		"fetched", len(users), "not_local", visitors,
+		"exposed", len(ranked), "rank_by", string(e.rank))
 	return nil
 }
 
