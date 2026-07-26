@@ -133,19 +133,19 @@ func newOpsMetrics(reg prometheus.Registerer) *opsMetrics {
 
 		scans: f.counterVec(prometheus.CounterOpts{
 			Name: "turf_zone_scans_total",
-			Help: "Zone discovery scans, by outcome.",
+			Help: "Zone scans, by outcome.",
 		}, "outcome"),
 		scanTime: f.gauge(prometheus.GaugeOpts{
 			Name: "turf_zone_scan_last_success_timestamp_seconds",
-			Help: "When the zone discovery scan last completed successfully.",
+			Help: "When the zone scan last completed successfully.",
 		}),
 		scanTiles: f.gauge(prometheus.GaugeOpts{
 			Name: "turf_zone_scan_tiles",
-			Help: "Number of bounding box tiles the discovery scan requests.",
+			Help: "Number of bounding box tiles the zone scan requests.",
 		}),
 		scanZones: f.gaugeVec(prometheus.GaugeOpts{
 			Name: "turf_area_zones",
-			Help: "Zones found by the last discovery scan, split by whether they fall inside the monitored area.",
+			Help: "Zones found by the last zone scan, split by whether they fall inside the monitored area.",
 		}, "monitored"),
 	}
 }
@@ -214,7 +214,7 @@ type playerSample struct {
 	// they are only here because they were pinned.
 	Positions map[string]int
 	// AreaZones is how many zones inside the monitored area the player held at
-	// the last discovery scan; -1 means there is no scan data yet.
+	// the last zone scan; -1 means there is no scan data yet.
 	AreaZones int
 	// ObservedTakeovers is how many takeovers we recorded for this player from
 	// the feed, within the takeover retention window.
@@ -308,7 +308,7 @@ func newPlayerCollector() *playerCollector {
 		"The player's position on the global Turf leaderboard.",
 		func(s playerSample) (float64, bool) { return float64(s.User.Place), s.User.Place > 0 })
 	gauge("turf_player_area_zones",
-		"Zones inside the monitored area the player held at the last discovery scan.",
+		"Zones inside the monitored area the player held at the last zone scan.",
 		func(s playerSample) (float64, bool) { return float64(s.AreaZones), s.AreaZones >= 0 })
 
 	c.position = prometheus.NewDesc(

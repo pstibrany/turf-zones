@@ -391,7 +391,7 @@ type exporter struct {
 	registry *prometheus.Registry
 
 	// areaZones maps player id to zones held inside the monitored area as of the
-	// last discovery scan. Written by scanLoop, read by the stats refresher.
+	// last zone scan. Written by scanLoop, read by the stats refresher.
 	areaZones atomic.Pointer[map[int64]int]
 
 	boards      []board
@@ -668,7 +668,7 @@ func (e *exporter) logTakeover(ctx context.Context, t takeover) {
 }
 
 // ---------------------------------------------------------------------------
-// Zone discovery scan
+// Zone scan
 // ---------------------------------------------------------------------------
 
 func (e *exporter) scanTiles() []bbox {
@@ -704,7 +704,7 @@ func (e *exporter) scanLoop(ctx context.Context) error {
 func (e *exporter) scanZones(ctx context.Context) error {
 	tiles := e.scanTiles()
 	start := time.Now()
-	e.log.Info("starting zone discovery scan", "tiles", len(tiles),
+	e.log.Info("starting zone scan", "tiles", len(tiles),
 		"estimated_duration", (time.Duration(len(tiles)) * e.cfg.APIMinInterval).Round(time.Second).String())
 
 	// Adjacent tiles share their edges, so dedupe by zone id.
@@ -741,7 +741,7 @@ func (e *exporter) scanZones(ctx context.Context) error {
 	e.metrics.scanZones.WithLabelValues("true").Set(float64(inArea))
 	e.metrics.scanZones.WithLabelValues("false").Set(float64(outside))
 
-	e.log.Info("zone discovery scan complete",
+	e.log.Info("zone scan complete",
 		"duration", time.Since(start).Round(time.Second).String(),
 		"zones_in_area", inArea, "zones_outside_area", outside, "zone_owners", len(owners))
 	return nil

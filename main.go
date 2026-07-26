@@ -85,7 +85,7 @@ func defaultConfig() Config {
 		// about one request per minute (a feed poll, plus one batched user refresh
 		// every ten), so this uses under a tenth of the allowance on a free
 		// service that warns about heavy use. The only thing it slows is the
-		// discovery scan, which is sequential: 16 tiles take ~80s.
+		// zone scan, which is sequential: 16 tiles take ~80s.
 		APIMinInterval: 5 * time.Second,
 		APIMaxRetries:  4,
 		Countries:      stringList{"dk"},
@@ -139,13 +139,13 @@ func (c *Config) registerFlags(fs *flag.FlagSet) {
 		"Comma-separated area (municipality) ids or names to narrow the region further; empty means all of it.")
 
 	fs.BoolVar(&c.ScanEnabled, "scan.enabled", c.ScanEnabled,
-		"Periodically enumerate zones to discover players. Without it the roster only grows from the takeover feed, which is slow for a small country.")
+		"Periodically enumerate zones in the configured boxes. This no longer discovers players — /users/top does — it only supplies turf_player_area_zones, how much ground each player holds locally.")
 	fs.Var(&c.Boxes, "scan.bbox",
-		"Bounding boxes to scan for players, as south,west,north,east. Separate multiple boxes with ';'. Only zones matching the region filter are kept.")
-	fs.DurationVar(&c.ScanInterval, "scan.interval", c.ScanInterval, "How often to run the zone discovery scan.")
+		"Bounding boxes to scan, as south,west,north,east. Separate multiple boxes with ';'. Only zones matching the region filter are counted.")
+	fs.DurationVar(&c.ScanInterval, "scan.interval", c.ScanInterval, "How often to run the zone scan.")
 	fs.Float64Var(&c.ScanTileLat, "scan.tile-lat", c.ScanTileLat, "Latitude span of one scan tile, in degrees.")
 	fs.Float64Var(&c.ScanTileLon, "scan.tile-lon", c.ScanTileLon,
-		"Longitude span of one scan tile, in degrees. The API rejects boxes above roughly 320 km².")
+		"Longitude span of one scan tile, in degrees. The API rejects a box when Δlat × Δlon exceeds 0.05.")
 	fs.IntVar(&c.ScanMaxSplit, "scan.max-split", c.ScanMaxSplit,
 		"How many times a tile may be quartered when the API still calls it too big.")
 
