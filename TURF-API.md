@@ -2,15 +2,22 @@
 
 What we learned probing the live [Turf](https://turfgame.com/) API. Findings are
 **empirical** (verified against the running API) unless marked *documented*.
-The official wiki pages ([Turf API](https://wiki.turfgame.com/en/wiki/Turf_API))
-are mostly deprecation stubs, so most of this is not written down anywhere else.
+
+> **Read <https://api.turfgame.com/v5> first.** The base URL serves a full
+> reference page. An earlier version of this file was written from the wiki
+> ([Turf API](https://wiki.turfgame.com/en/wiki/Turf_API)), which is mostly
+> deprecation stubs, and concluded there was no leaderboard endpoint. There is —
+> `/users/top` — and building an approximation of it cost far more than reading
+> the docs would have. Several other endpoints were missed the same way.
 
 ## Basics
 
 - **Base URL:** `https://api.turfgame.com/v5` — v5 is the preferred version (as of Jan 2026).
   Older: `/v2`, `/v3`, `/v4` (deprecated); `/unstable` for experimental.
 - **Auth:** none. Plain JSON in/out.
-- **Rate limit:** **1 request per second**, global. Exceeding it returns
+- **Rate limit:** **1 request per second per resource** (*documented* wording —
+  endpoints appear to have separate budgets, though this code plays it safe with
+  one shared limiter). Exceeding it returns
   `{"errorMessage":"Only one request per second allowed","errorCode":195887108}`
   (seen as HTTP 429 / inline error). Heavy or malicious use → ban.
 - **CORS:** enabled and permissive — reflects the request `Origin` (and returns
@@ -23,15 +30,47 @@ are mostly deprecation stubs, so most of this is not written down anywhere else.
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/zones` | POST | Zones inside a bounding box |
+| `/zones` | POST | Zones inside a bounding box, or by name/id |
 | `/zones/<name\|id>` | GET | One zone, richer detail |
-| `/users` | POST | Player stats (batch) |
-| `/regions` | GET | All regions/areas per country |
+| `/zones/all` | GET | **Every zone in the game**, one request, ≤1 per 30 min |
+| `/users` | POST | Player stats (batch, by name / id / email) |
+| **`/users/top`** | **GET, POST** | **Leaderboard — global, or per region/country** |
+| `/users/location` | GET | Players currently visible on the game map |
+| `/regions` | GET, POST | All regions/areas per country; POST adds regionlords |
 | `/rounds` | GET | Monthly round schedule |
+| `/statistics` | GET | Game-wide counters (users online, zones taken today, …) |
 | `/feeds` | GET | Combined live event stream |
-| `/feeds/<type>` | GET | Single event stream (`takeover`/`zone`/`medal`/`chat`) |
+| `/feeds/<type>` | GET | One or more streams; combine with `+`, e.g. `/feeds/chat+medal` |
+| `/events`, `/events/{id}`, `/events/{id}/feed` | GET | Finished public events |
 
 `GET` on `/zones` or `/users` returns **405** — they are POST-only.
+
+### POST /users/top — the leaderboard
+
+The endpoint that removes any need to discover players.
+
+```json
+{"region": "hovedstaden", "from": 1, "to": 50}
+{"country": "dk", "from": 1, "to": 50}
+{"from": 1, "to": 50}
+```
+
+Returns full user objects in rank order, with `place` **localized to the
+requested scope** — 1, 2, 3… within that region or country rather than the
+global position. `GET /users/top` gives the global top 50.
+
+Verified against the game's own tabs: the values it displays are exactly the
+API's `points`, so a regional list is **not** "points earned in that region" —
+it is players *registered* to that region, ranked by their global round score.
+The region tab ignores country (Hovedstaden includes a German and a Swede); the
+country tab filters on country and excludes both.
+
+- ⚠️ **`region` must be the name**, case-insensitive. `{"region": 172}` → **500**.
+- ⚠️ **50 per request.** `to: 200` still returns 50.
+- ⚠️ **Windows past the first 50 renumber.** `{"from": 51, "to": 100}` returned 24
+  users whose `place` read 25–48, not 51–74. Treat anything beyond the first
+  page as unreliable for ranking.
+- A region can be shorter than 50: Hovedstaden had 38 players.
 
 ### POST /zones — bounding box
 
@@ -49,21 +88,31 @@ Body is an **array** of box objects:
 - ⚠️ **The box has a size limit** — too large returns
   `{"errorMessage":"The area is too big","errorCode":195887106}` (HTTP 400).
 
-**Measured limit** (at ~55.5°N, binary searched):
+The rule is **documented**, and it is a plain product of degrees:
 
-| box (Δlat × Δlon) | ≈ km² | result |
+```
+(northEast.latitude - southWest.latitude) * (northEast.longitude - southWest.longitude) > 0.05
+```
+
+Measured values agree exactly — the cutoff is at 0.05 deg², nothing to do with
+ground area or latitude:
+
+| box (Δlat × Δlon) | deg² | result |
 |---|---|---|
-| 0.20 × 0.20 | 280 | OK (257 zones) |
-| 0.15 × 0.30 | 315 | OK (422 zones) |
-| 0.20 × 0.25 | 350 | rejected |
-| 0.10 × 0.50 | 350 | rejected |
-| 0.30 × 0.40 | 838 | rejected |
+| 0.20 × 0.20 | 0.040 | OK (257 zones) |
+| 0.15 × 0.30 | 0.045 | OK (422 zones) |
+| 0.20 × 0.25 | 0.050 | rejected |
+| 0.10 × 0.50 | 0.050 | rejected |
+| 0.30 × 0.40 | 0.120 | rejected |
 
-So the cutoff sits between **315 and 350 km²**, and tracks ground area rather
-than degrees or aspect ratio — 0.10 × 0.50 and 0.20 × 0.25 are the same area and
-both fail. A safe tile is ~0.15 × 0.25 degrees. All of Denmark in one box is
-rejected outright; it needs ~700 tiles. Rather than hard-coding a limit, it is
-more robust to catch `195887106` and split the box into quarters.
+(An earlier note here claimed the limit tracked km² rather than degrees, inferred
+from the two 0.050 boxes failing. They fail because they are both exactly at the
+documented threshold, not because of their area.)
+
+A safe tile is ~0.15 × 0.25. All of Denmark in one box is rejected and would need
+~700 tiles — but see `/zones/all`, which returns every zone in the game in a
+single request, at most once per 30 minutes. Catching `195887106` and quartering
+the box is still the robust way to handle an oversized request.
 
 **Zone object:**
 
@@ -114,9 +163,13 @@ in one call). Plain string arrays (`["Siper"]`) return **500** — must be objec
 }
 ```
 
-- **No leaderboard / all-users / GET endpoint** — you must already know each
-  player's `name` or `id`. Discover names by harvesting `currentOwner.name` /
-  `previousOwner.name` from `/zones` and `/feeds/takeover`, then batch into `/users`.
+- `/users` needs a name, id or email you already have — but **`/users/top` is the
+  way to get a ranked list**, and `/zones/all` the way to enumerate holders.
+  Harvesting names from `/feeds/takeover` is only worth it for tracking activity,
+  not for building a leaderboard.
+- `place` here is the **global** position, unlike in `/users/top` where it is
+  localized to the requested region or country. Mixing the two silently changes
+  what the number means.
 - `zones` (owned) + `POST /zones` lets you plot where a player currently holds ground.
 - **Batches are generous:** 500 players in one request returned all 500
   (~320 KB) with no error. So a whole regional roster refreshes in one or two
@@ -156,8 +209,9 @@ retained.
 
 **Event envelopes** (all have `time` + `type`):
 
-- `takeover` — `{ zone:{…, previousOwner, currentOwner}, currentOwner, latitude, longitude, time, type }`
+- `takeover` — `{ zone:{…, previousOwner, currentOwner}, currentOwner, assists, latitude, longitude, time, type }`
   (carries the full zone, the taker, the previous owner, and points — the richest event).
+  `assists` is *documented* as `[{"id":412,"name":"…"}, …]`; absent in every event sampled here.
   `currentOwner`/`latitude`/`longitude` are duplicated at top level and inside `zone`.
   `previousOwner` is **absent** for a zone that was neutral (new, or start of round).
 - `zone` — `{ zone:{…}, time, type }` — a newly created zone. `dateLastTaken` is
@@ -237,6 +291,11 @@ A new zone — no `currentOwner` at all, and the never-taken sentinel date:
 
 ## Gotchas
 
+- **Check <https://api.turfgame.com/v5> before inferring anything.** The wiki is
+  stubs; the base URL is the real reference. Assuming otherwise is how this file
+  came to deny that `/users/top` exists.
+- `/users/top` takes a region by **name**; an id returns 500. Its `place` is
+  localized; `/users`' `place` is global.
 - POST-only endpoints (`/zones`, `/users`) 405 on GET.
 - `/users` body must be objects, not strings (else 500); dedupe results by `id`,
   since one player asked for twice comes back twice.
