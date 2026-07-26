@@ -287,7 +287,7 @@ func newPlayerCollector() *playerCollector {
 		"Takeovers the player has made all-time, as reported by the Turf user API.",
 		always(func(s playerSample) int64 { return s.User.Taken }))
 	counter("turf_player_observed_takeovers_total",
-		"Takeovers by the player recorded from the takeover feed and still within the retention window.",
+		"Takeovers by the player inside the monitored area only, from the takeover feed, within the retention window. Reads 0 for players who are ranked on a wider board but play elsewhere.",
 		always(func(s playerSample) int64 { return s.ObservedTakeovers }))
 	counter("turf_player_total_points",
 		"All-time points scored by the player.",
