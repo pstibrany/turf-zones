@@ -1,7 +1,8 @@
 package main
 
 import (
-	"sort"
+	"cmp"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -28,8 +29,6 @@ type opsMetrics struct {
 	feedLag       prometheus.Gauge
 	feedCursor    prometheus.Gauge
 
-	rosterPlayers   prometheus.Gauge
-	filteredPlayers prometheus.Gauge
 	exposedPlayers  prometheus.Gauge
 	storedTakeovers prometheus.Gauge
 
@@ -91,17 +90,9 @@ func newOpsMetrics(reg prometheus.Registerer) *opsMetrics {
 			Help: "Timestamp of the newest feed event processed so far.",
 		}),
 
-		rosterPlayers: f.gauge(prometheus.GaugeOpts{
-			Name: "turf_roster_players",
-			Help: "Players discovered in the monitored area and still within the roster retention window.",
-		}),
-		filteredPlayers: f.gauge(prometheus.GaugeOpts{
-			Name: "turf_non_local_players",
-			Help: "Players discovered in the area but excluded from the leaderboard because they are registered elsewhere (roster.scope=home).",
-		}),
 		exposedPlayers: f.gauge(prometheus.GaugeOpts{
 			Name: "turf_exposed_players",
-			Help: "Players currently exposed as per-player metric series.",
+			Help: "Players currently exposed as per-player metric series, across all boards.",
 		}),
 		storedTakeovers: f.gauge(prometheus.GaugeOpts{
 			Name: "turf_stored_takeovers",
@@ -353,16 +344,14 @@ func (c *playerCollector) set(samples []playerSample) {
 // pinned players that did not place at the end.
 func (c *playerCollector) snapshot() []playerSample {
 	c.mu.RLock()
-	out := make([]playerSample, len(c.samples))
-	copy(out, c.samples)
+	out := slices.Clone(c.samples)
 	c.mu.RUnlock()
 
-	sort.SliceStable(out, func(i, j int) bool {
-		pi, pj := out[i].bestPosition(), out[j].bestPosition()
-		if pi != pj {
-			return pi < pj
-		}
-		return out[i].User.Points > out[j].User.Points
+	slices.SortStableFunc(out, func(a, b playerSample) int {
+		return cmp.Or(
+			cmp.Compare(a.bestPosition(), b.bestPosition()),
+			cmp.Compare(b.User.Points, a.User.Points),
+		)
 	})
 	return out
 }

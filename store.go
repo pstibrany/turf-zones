@@ -110,6 +110,44 @@ var migrations = []string{
 	CREATE INDEX player_history_player ON player_history(player_id, ts);
 	CREATE INDEX player_history_ts ON player_history(ts);
 	`,
+	// 3: /users/top returns each leaderboard already ranked and complete, so the
+	// roster has nothing left to do — players existed only to accumulate an
+	// approximation of a list the API serves directly.
+	//
+	// player_stats survives with a new shape and a new job: a cache of the last
+	// leaderboard, so a restart can render the page before the first API call
+	// returns — and can still render it if the API is down at that moment. That
+	// means remembering which board and which position, not just the figures, so
+	// the key becomes (board, player_id). Pinned players who placed nowhere are
+	// stored under the empty board.
+	`
+	DROP TABLE IF EXISTS players;
+	DROP TABLE IF EXISTS player_stats;
+
+	CREATE TABLE player_stats (
+		board              TEXT    NOT NULL,
+		player_id          INTEGER NOT NULL,
+		position           INTEGER,
+		pinned             INTEGER NOT NULL DEFAULT 0,
+		updated_at         INTEGER NOT NULL,
+		name               TEXT    NOT NULL,
+		country            TEXT,
+		region_id          INTEGER,
+		region_name        TEXT,
+		points             INTEGER,
+		points_per_hour    INTEGER,
+		total_points       INTEGER,
+		place              INTEGER,
+		rank               INTEGER,
+		taken              INTEGER,
+		unique_zones_taken INTEGER,
+		blocktime          INTEGER,
+		medals             INTEGER,
+		zones              INTEGER,
+		area_zones         INTEGER,
+		PRIMARY KEY (board, player_id)
+	);
+	`,
 }
 
 // openStore opens the database at path, creating and migrating it as needed.
@@ -175,127 +213,6 @@ func (s *store) migrate(ctx context.Context, log *slog.Logger) error {
 }
 
 func (s *store) Close() error { return s.db.Close() }
-
-// player is a roster entry: someone seen active in the monitored area.
-type player struct {
-	ID        int64
-	Name      string
-	FirstSeen time.Time
-	LastSeen  time.Time
-	Pinned    bool
-}
-
-// seePlayers records that these players were active at time at. Pinned players
-// are never dropped from the roster regardless of activity.
-func (s *store) seePlayers(ctx context.Context, owners []Owner, at time.Time, pinned bool) error {
-	if len(owners) == 0 {
-		return nil
-	}
-	ts := at.Unix()
-	pin := 0
-	if pinned {
-		pin = 1
-	}
-	return s.tx(ctx, func(tx *sql.Tx) error {
-		stmt, err := tx.PrepareContext(ctx, `
-			INSERT INTO players (id, name, first_seen, last_seen, pinned)
-			VALUES (?, ?, ?, ?, ?)
-			ON CONFLICT(id) DO UPDATE SET
-				name      = excluded.name,
-				last_seen = MAX(players.last_seen, excluded.last_seen),
-				pinned    = MAX(players.pinned, excluded.pinned)`)
-		if err != nil {
-			return err
-		}
-		defer stmt.Close()
-		for _, o := range owners {
-			if o.ID == 0 {
-				continue
-			}
-			if _, err := stmt.ExecContext(ctx, o.ID, o.Name, ts, ts, pin); err != nil {
-				return fmt.Errorf("upsert player %d: %w", o.ID, err)
-			}
-		}
-		return nil
-	})
-}
-
-// roster returns players seen since the cutoff, plus every pinned player.
-func (s *store) roster(ctx context.Context, since time.Time) ([]player, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, first_seen, last_seen, pinned FROM players
-		WHERE last_seen >= ? OR pinned = 1
-		ORDER BY last_seen DESC`, since.Unix())
-	if err != nil {
-		return nil, fmt.Errorf("query roster: %w", err)
-	}
-	defer rows.Close()
-
-	var out []player
-	for rows.Next() {
-		var p player
-		var first, last int64
-		if err := rows.Scan(&p.ID, &p.Name, &first, &last, &p.Pinned); err != nil {
-			return nil, err
-		}
-		p.FirstSeen, p.LastSeen = time.Unix(first, 0), time.Unix(last, 0)
-		out = append(out, p)
-	}
-	return out, rows.Err()
-}
-
-// forgetPlayers removes players entirely, along with any stats stored for them.
-// Used for visitors: someone registered elsewhere who happened to take a zone
-// here is discovered, checked once, and then dropped, so the roster stays the
-// size of the local player base instead of everyone who passed through. If they
-// turn up again they are simply re-checked — which is also how a genuine move
-// between regions gets noticed.
-func (s *store) forgetPlayers(ctx context.Context, ids []int64) (int64, error) {
-	if len(ids) == 0 {
-		return 0, nil
-	}
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		args[i] = id
-	}
-	list := placeholders(len(ids))
-	var removed int64
-	err := s.tx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx,
-			`DELETE FROM players WHERE pinned = 0 AND id IN (`+list+`)`, args...)
-		if err != nil {
-			return err
-		}
-		removed, _ = res.RowsAffected()
-		_, err = tx.ExecContext(ctx,
-			`DELETE FROM player_stats WHERE player_id IN (`+list+`)
-			 AND player_id NOT IN (SELECT id FROM players)`, args...)
-		return err
-	})
-	return removed, err
-}
-
-// prunePlayers drops non-pinned players not seen since the cutoff.
-func (s *store) prunePlayers(ctx context.Context, before time.Time) (int64, error) {
-	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM players WHERE pinned = 0 AND last_seen < ?`, before.Unix())
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
-}
-
-// pruneOrphanedStats drops stats for players no longer on the roster. Without
-// it player_stats would keep every player ever seen, and a warm start would rank
-// people who left the area months ago.
-func (s *store) pruneOrphanedStats(ctx context.Context) (int64, error) {
-	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM player_stats WHERE player_id NOT IN (SELECT id FROM players)`)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
-}
 
 // takeover is one takeover event, flattened for storage.
 type takeover struct {
@@ -412,11 +329,10 @@ func (s *store) takeoverCounts(ctx context.Context, since time.Time) (map[int64]
 	return out, rows.Err()
 }
 
-// countPlayers returns every player row, including ones that have aged off the
-// roster but not yet been pruned.
+// countPlayers returns how many distinct players the cached leaderboards hold.
 func (s *store) countPlayers(ctx context.Context) (int64, error) {
 	var n int64
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM players`).Scan(&n)
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT player_id) FROM player_stats`).Scan(&n)
 	return n, err
 }
 
@@ -435,87 +351,139 @@ func (s *store) pruneTakeovers(ctx context.Context, before time.Time) (int64, er
 	return res.RowsAffected()
 }
 
-// saveStats records the latest stats for each player.
-func (s *store) saveStats(ctx context.Context, users []User, at time.Time) error {
-	if len(users) == 0 {
-		return nil
-	}
+// cacheLeaderboards replaces the cached copy of every board with the given
+// samples. It is a whole-table swap rather than an upsert, because a player who
+// has dropped off a board must disappear from the cache too — otherwise a
+// restart would resurrect them.
+func (s *store) cacheLeaderboards(ctx context.Context, samples []playerSample, at time.Time) error {
 	return s.tx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM player_stats`); err != nil {
+			return err
+		}
 		stmt, err := tx.PrepareContext(ctx, `
 			INSERT INTO player_stats (
-				player_id, updated_at, name, country, region_id, region_name,
-				points, points_per_hour, total_points, place, rank, taken,
-				unique_zones_taken, blocktime, medals, zones
-			) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-			ON CONFLICT(player_id) DO UPDATE SET
-				updated_at = excluded.updated_at, name = excluded.name,
-				country = excluded.country, region_id = excluded.region_id,
-				region_name = excluded.region_name, points = excluded.points,
-				points_per_hour = excluded.points_per_hour, total_points = excluded.total_points,
-				place = excluded.place, rank = excluded.rank, taken = excluded.taken,
-				unique_zones_taken = excluded.unique_zones_taken,
-				blocktime = excluded.blocktime, medals = excluded.medals, zones = excluded.zones`)
+				board, player_id, position, pinned, updated_at, name, country,
+				region_id, region_name, points, points_per_hour, total_points,
+				place, rank, taken, unique_zones_taken, blocktime, medals, zones,
+				area_zones
+			) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 		if err != nil {
 			return err
 		}
 		defer stmt.Close()
-		for _, u := range users {
+
+		for _, p := range samples {
+			u := p.User
 			var regionID int64
 			var regionName string
 			if u.Region != nil {
 				regionID, regionName = u.Region.ID, u.Region.Name
 			}
-			if _, err := stmt.ExecContext(ctx,
-				u.ID, at.Unix(), u.Name, u.Country, regionID, regionName,
-				u.Points, u.PointsPerHour, u.TotalPoints, u.Place, u.Rank, u.Taken,
-				u.UniqueZonesTaken, u.Blocktime, len(u.Medals), len(u.Zones)); err != nil {
-				return fmt.Errorf("save stats for %d: %w", u.ID, err)
+			var areaZones any
+			if p.AreaZones >= 0 {
+				areaZones = p.AreaZones
+			}
+			pinned := 0
+			if p.Pinned {
+				pinned = 1
+			}
+			// One row per board the player placed on; a pinned player who placed
+			// nowhere still needs a row, stored under the empty board.
+			rows := make(map[string]any, len(p.Positions)+1)
+			for boardKey, pos := range p.Positions {
+				rows[boardKey] = pos
+			}
+			if len(rows) == 0 {
+				rows[""] = nil
+			}
+			for boardKey, pos := range rows {
+				if _, err := stmt.ExecContext(ctx,
+					boardKey, u.ID, pos, pinned, at.Unix(), u.Name, u.Country,
+					regionID, regionName, u.Points, u.PointsPerHour, u.TotalPoints,
+					u.Place, u.Rank, u.Taken, u.UniqueZonesTaken, u.Blocktime,
+					len(u.Medals), len(u.Zones), areaZones); err != nil {
+					return fmt.Errorf("cache %s/%d: %w", boardKey, u.ID, err)
+				}
 			}
 		}
 		return nil
 	})
 }
 
-// loadStats returns the last known stats for every player, so a restart can
-// serve metrics before the first refresh completes.
-func (s *store) loadStats(ctx context.Context) ([]playerSample, error) {
+// cachedLeaderboards returns the last leaderboards written by
+// cacheLeaderboards, so a restart can render the page before the first API call
+// returns — and can still render it if the API happens to be down right then.
+func (s *store) cachedLeaderboards(ctx context.Context) ([]playerSample, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT player_id, updated_at, name, country, region_id, region_name,
-		       points, points_per_hour, total_points, place, rank, taken,
-		       unique_zones_taken, blocktime, medals, zones
+		SELECT board, player_id, position, pinned, updated_at, name, country,
+		       region_id, region_name, points, points_per_hour, total_points,
+		       place, rank, taken, unique_zones_taken, blocktime, medals, zones,
+		       area_zones
 		FROM player_stats`)
 	if err != nil {
-		return nil, fmt.Errorf("load stats: %w", err)
+		return nil, fmt.Errorf("load cached leaderboards: %w", err)
 	}
 	defer rows.Close()
 
-	var out []playerSample
+	// Rows are per board, so several may describe the same player; merge them
+	// back into one sample carrying every position.
+	byPlayer := make(map[int64]*playerSample)
+	var order []int64
 	for rows.Next() {
 		var (
-			s                 playerSample
-			updated, regionID int64
-			country, regionNm sql.NullString
-			medals, zoneCount int64
+			boardKey           string
+			playerID           int64
+			position, areaZone sql.NullInt64
+			pinned, updated    int64
+			regionID           int64
+			medals, zoneCount  int64
+			name               string
+			country, regionNm  sql.NullString
+			u                  User
 		)
-		if err := rows.Scan(&s.User.ID, &updated, &s.User.Name, &country, &regionID, &regionNm,
-			&s.User.Points, &s.User.PointsPerHour, &s.User.TotalPoints, &s.User.Place,
-			&s.User.Rank, &s.User.Taken, &s.User.UniqueZonesTaken, &s.User.Blocktime,
-			&medals, &zoneCount); err != nil {
+		if err := rows.Scan(&boardKey, &playerID, &position, &pinned, &updated, &name,
+			&country, &regionID, &regionNm, &u.Points, &u.PointsPerHour, &u.TotalPoints,
+			&u.Place, &u.Rank, &u.Taken, &u.UniqueZonesTaken, &u.Blocktime,
+			&medals, &zoneCount, &areaZone); err != nil {
 			return nil, err
 		}
-		s.UpdatedAt = time.Unix(updated, 0)
-		s.User.Country = country.String
-		if regionID != 0 || regionNm.String != "" {
-			s.User.Region = &Region{ID: regionID, Name: regionNm.String, Country: country.String}
+
+		p, ok := byPlayer[playerID]
+		if !ok {
+			u.ID, u.Name, u.Country = playerID, name, country.String
+			if regionID != 0 || regionNm.String != "" {
+				u.Region = &Region{ID: regionID, Name: regionNm.String, Country: country.String}
+			}
+			// Only counts were stored, not the id lists; slices of the right
+			// length keep the collector's len() arithmetic honest.
+			u.Medals = make([]int64, medals)
+			u.Zones = make([]int64, zoneCount)
+			p = &playerSample{
+				User:      u,
+				Positions: map[string]int{},
+				Pinned:    pinned == 1,
+				AreaZones: -1,
+				UpdatedAt: time.Unix(updated, 0),
+			}
+			if areaZone.Valid {
+				p.AreaZones = int(areaZone.Int64)
+			}
+			byPlayer[playerID] = p
+			order = append(order, playerID)
 		}
-		// Only the counts were stored, not the id lists; synthesising slices of
-		// the right length keeps the collector's len() arithmetic honest.
-		s.User.Medals = make([]int64, medals)
-		s.User.Zones = make([]int64, zoneCount)
-		s.AreaZones = -1
-		out = append(out, s)
+		if boardKey != "" && position.Valid {
+			p.Positions[boardKey] = int(position.Int64)
+		}
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]playerSample, 0, len(order))
+	for _, id := range order {
+		out = append(out, *byPlayer[id])
+	}
+	return out, nil
 }
 
 // insertHistory records a snapshot of each player at the given bucket time.
@@ -663,6 +631,26 @@ func (s *store) countHistory(ctx context.Context) (int64, error) {
 
 func placeholders(n int) string {
 	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
+}
+
+// getMeta reads a string from the meta table; ok is false when absent.
+func (s *store) getMeta(ctx context.Context, key string) (value string, ok bool, err error) {
+	err = s.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, key).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return value, true, nil
+}
+
+// setMeta writes a string to the meta table.
+func (s *store) setMeta(ctx context.Context, key, value string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO meta (key, value) VALUES (?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
+	return err
 }
 
 // getMetaTime reads a timestamp from the meta table.

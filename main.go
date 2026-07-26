@@ -57,11 +57,8 @@ type Config struct {
 	FeedStoreRaw    bool
 
 	StatsInterval time.Duration
-	RosterTTL     time.Duration
-	RosterScope   rosterScope
 	CountryBoard  bool
 	TopN          int
-	RankBy        string
 	Players       stringList
 
 	HistoryInterval  time.Duration
@@ -108,10 +105,8 @@ func defaultConfig() Config {
 		FeedStore:       scopeMonitored,
 
 		StatsInterval: 10 * time.Minute,
-		RosterTTL:     7 * 24 * time.Hour,
-		RosterScope:   scopeHome,
+		CountryBoard:  true,
 		TopN:          50,
-		RankBy:        "points",
 
 		HistoryInterval:  time.Hour,
 		HistoryRetention: 90 * 24 * time.Hour,
@@ -164,15 +159,11 @@ func (c *Config) registerFlags(fs *flag.FlagSet) {
 	fs.BoolVar(&c.FeedStoreRaw, "feed.store-raw", c.FeedStoreRaw,
 		"Also keep the raw JSON of each takeover event, in the database and in the log line.")
 
-	fs.DurationVar(&c.StatsInterval, "stats.interval", c.StatsInterval, "How often to refresh player stats.")
-	fs.DurationVar(&c.RosterTTL, "roster.ttl", c.RosterTTL,
-		"How long a player stays on the roster after we last saw them active in the area.")
-	fs.Var(rosterScopeValue{&c.RosterScope}, "roster.scope",
-		"Who appears on the leaderboard. 'home' lists players registered to the monitored region, reproducing the game's own regional ranking. 'area' instead lists whoever holds or takes zones here, which surfaces visitors carrying their whole national score.")
+	fs.DurationVar(&c.StatsInterval, "stats.interval", c.StatsInterval, "How often to refetch the leaderboards.")
 	fs.BoolVar(&c.CountryBoard, "boards.country", c.CountryBoard,
-		"Also show a country-wide leaderboard alongside the region one. Off by default: unless every region of the country is scanned, absent players shift everyone below them up, so the positions are wrong rather than merely incomplete.")
-	fs.IntVar(&c.TopN, "top.n", c.TopN, "How many players to expose as metrics.")
-	fs.StringVar(&c.RankBy, "top.by", c.RankBy, "Stat the top list is ranked by: "+rankByValues()+".")
+		"Also show a country-wide leaderboard alongside the region one. Both come straight from /users/top, so both are complete.")
+	fs.IntVar(&c.TopN, "top.n", c.TopN,
+		"How many players per board to expose. The API returns at most 50, and windows past that renumber, so higher values have no effect.")
 	fs.Var(&c.Players, "players",
 		"Comma-separated player names or ids to always track, whether or not they make the top list.")
 
@@ -190,12 +181,6 @@ func (c *Config) registerFlags(fs *flag.FlagSet) {
 func (c *Config) validate() error {
 	if c.APIMinInterval < time.Second {
 		return fmt.Errorf("api.min-interval must be at least 1s (the API allows one request per second), got %s", c.APIMinInterval)
-	}
-	if !rankBy(c.RankBy).valid() {
-		return fmt.Errorf("top.by must be one of %s, got %q", rankByValues(), c.RankBy)
-	}
-	if !c.RosterScope.valid() {
-		return fmt.Errorf("roster.scope must be home or area, got %q", c.RosterScope)
 	}
 	if c.TopN <= 0 {
 		return fmt.Errorf("top.n must be positive, got %d", c.TopN)
@@ -220,9 +205,6 @@ func (c *Config) validate() error {
 	if c.StatsInterval <= 0 {
 		return fmt.Errorf("stats.interval must be positive")
 	}
-	if c.RosterTTL <= 0 {
-		return fmt.Errorf("roster.ttl must be positive")
-	}
 	// A token short enough to brute-force is worse than none, because it invites
 	// the belief that the endpoint is protected.
 	if c.APIToken != "" && len(c.APIToken) < 16 {
@@ -241,10 +223,6 @@ func (c *Config) validate() error {
 		if c.ScanTileLat <= 0 || c.ScanTileLon <= 0 {
 			return fmt.Errorf("scan.tile-lat and scan.tile-lon must be positive")
 		}
-	}
-	// Ranking by area zones only means anything once a scan has run.
-	if rankBy(c.RankBy) == "areaZones" && !c.ScanEnabled {
-		return fmt.Errorf("top.by=areaZones requires scan.enabled")
 	}
 	return nil
 }
@@ -406,25 +384,6 @@ func (l *bboxList) Set(s string) error {
 		}
 		*l = append(*l, b)
 	}
-	return nil
-}
-
-// rosterScopeValue adapts rosterScope to flag.Value.
-type rosterScopeValue struct{ target *rosterScope }
-
-func (v rosterScopeValue) String() string {
-	if v.target == nil {
-		return ""
-	}
-	return string(*v.target)
-}
-
-func (v rosterScopeValue) Set(s string) error {
-	rs := rosterScope(strings.ToLower(strings.TrimSpace(s)))
-	if !rs.valid() {
-		return fmt.Errorf("must be home or area")
-	}
-	*v.target = rs
 	return nil
 }
 

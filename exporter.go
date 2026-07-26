@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -11,14 +12,14 @@ import (
 	"fmt"
 	"html/template"
 	"log/slog"
+	"maps"
+	"math"
 	"net"
 	"net/http"
 	"os"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -50,22 +51,6 @@ var pageTemplates = template.Must(template.ParseFS(templateFS, "templates/*.html
 // ---------------------------------------------------------------------------
 // Monitored area
 // ---------------------------------------------------------------------------
-
-// rosterScope decides who belongs on the leaderboard.
-//
-// scopeHome reproduces the game's own regional list: everyone registered to the
-// region, ranked by round points. scopeArea instead ranks whoever is holding or
-// taking ground here, which is a different and occasionally more interesting
-// question — but it is not what the game shows, because a visitor arrives
-// carrying every point they have earned elsewhere.
-type rosterScope string
-
-const (
-	scopeHome rosterScope = "home"
-	scopeArea rosterScope = "area"
-)
-
-func (r rosterScope) valid() bool { return r == scopeHome || r == scopeArea }
 
 // scope selects how much of the global feed a stage cares about.
 type scope string
@@ -124,30 +109,13 @@ func (s areaSelector) matches(r *Region) bool {
 	return true
 }
 
-// matchesUser tests a player's own registration rather than where their zones
-// are, which is how the game builds its leaderboards.
-//
-// The two tabs filter differently, and this mirrors that: the region tab lists
-// everyone whose home region is that region, whatever their country — Hovedstaden
-// includes a German and a Swede — while the country tab filters on country and
-// drops both of them. So when regions are configured they decide alone, and
-// country only applies when no region was given.
-func (s areaSelector) matchesUser(u *User) bool {
-	if len(s.regions) > 0 {
-		return u.Region != nil && s.regions[u.Region.ID]
-	}
-	if len(s.countries) > 0 {
-		return s.countries[strings.ToLower(u.Country)]
-	}
-	return true
-}
-
-// board is one leaderboard tab. The game shows a region tab and a country tab
-// side by side, filtered differently, and a player can appear on both.
+// board is one leaderboard tab, defined by the query that produces it. The game
+// shows a region tab and a country tab side by side and a player can appear on
+// both, so each is fetched separately and positions are kept per board.
 type board struct {
-	Key   string // url/label safe: "hovedstaden", "denmark"
+	Key   string // label safe: "hovedstaden", "denmark"
 	Title string
-	match func(*User) bool
+	query topQuery
 }
 
 // countryNames are the display names for the country codes this is likely to
@@ -157,59 +125,35 @@ var countryNames = map[string]string{
 	"de": "Germany", "gb": "United Kingdom", "nl": "Netherlands", "us": "United States",
 }
 
-// boards derives the leaderboards from the configured area: a region tab when
-// regions are configured, a country tab when countries are, both when both —
-// which mirrors the game's own tabs without needing separate configuration.
+// boards derives the leaderboards from the configured area, mirroring the game's
+// own tabs: a region tab when a region is configured, a country tab per country.
+//
+// /users/top takes a region by name only — a numeric id returns HTTP 500 — which
+// is why region names are resolved from /regions at startup even when the
+// configuration supplied an id.
 func (s areaSelector) boards(includeCountry bool) []board {
 	var out []board
-	if len(s.regions) > 0 {
-		title := s.regionName
-		if title == "" {
-			title = "Region " + strings.Join(idLabels(s.regions, nil), "+")
-		}
-		regions := s.regions
+	if s.regionName != "" {
 		out = append(out, board{
-			Key:   slug(title),
-			Title: title,
-			match: func(u *User) bool { return u.Region != nil && regions[u.Region.ID] },
+			Key:   slug(s.regionName),
+			Title: s.regionName,
+			query: topQuery{Region: s.regionName},
 		})
 	}
-	// A country board is only honest when every region of that country is
-	// scanned. Otherwise it is not merely missing players: each absent player
-	// shifts everyone below them up, so the positions themselves are wrong.
-	if includeCountry && len(s.countries) > 0 {
-		codes := sortedKeys(s.countries)
-		titles := make([]string, len(codes))
-		for i, c := range codes {
-			if name, ok := countryNames[c]; ok {
-				titles[i] = name
-			} else {
-				titles[i] = strings.ToUpper(c)
+	if includeCountry {
+		for _, code := range sortedKeys(s.countries) {
+			title, ok := countryNames[code]
+			if !ok {
+				title = strings.ToUpper(code)
 			}
+			out = append(out, board{
+				Key:   slug(title),
+				Title: title,
+				query: topQuery{Country: code},
+			})
 		}
-		title := strings.Join(titles, " + ")
-		countries := s.countries
-		out = append(out, board{
-			Key:   slug(title),
-			Title: title,
-			match: func(u *User) bool { return countries[strings.ToLower(u.Country)] },
-		})
-	}
-	if len(out) == 0 {
-		out = append(out, board{Key: "all", Title: "All players", match: func(*User) bool { return true }})
 	}
 	return out
-}
-
-// broadened drops the region and area constraints, keeping only countries. Used
-// for discovery when a country board exists: that board needs players from every
-// region of the country, not just the one the bounding box covers. With no such
-// board it would only find players who are then immediately dropped as visitors.
-func (s areaSelector) broadened() areaSelector {
-	if len(s.countries) == 0 {
-		return s
-	}
-	return areaSelector{countries: s.countries, summary: s.summary + " (discovery: country-wide)"}
 }
 
 // slug reduces a title to something safe for a URL fragment and a metric label.
@@ -228,6 +172,72 @@ func slug(s string) string {
 		}
 	}
 	return strings.Trim(b.String(), "-")
+}
+
+// areaCacheKey holds the last successful region/area resolution, so a restart
+// during an API outage can still name its boards.
+const areaCacheKey = "area.resolved"
+
+// resolvedArea is the cacheable part of a selector: the ids the configuration
+// resolved to and the names they carry.
+type resolvedArea struct {
+	Regions map[int64]string `json:"regions"`
+	Areas   map[int64]string `json:"areas"`
+}
+
+// resolveArea resolves the configured area against the API, falling back to the
+// last cached resolution when the API cannot be reached.
+//
+// Region and area ids never change, so a stale cache is as good as a fresh
+// lookup — and being able to boot without the API is worth far more than the
+// certainty of re-validating names that were already correct.
+func resolveArea(ctx context.Context, c *turfClient, st *store, cfg Config, log *slog.Logger) (areaSelector, error) {
+	sel, err := resolveSelector(ctx, c, cfg.Countries, cfg.Regions, cfg.Areas)
+	if err == nil {
+		cache := resolvedArea{Regions: map[int64]string{}, Areas: map[int64]string{}}
+		for id := range sel.regions {
+			cache.Regions[id] = sel.regionName
+		}
+		for id := range sel.areas {
+			cache.Areas[id] = ""
+		}
+		if data, mErr := json.Marshal(cache); mErr == nil {
+			if sErr := st.setMeta(ctx, areaCacheKey, string(data)); sErr != nil {
+				log.Warn("could not cache area resolution", "err", sErr)
+			}
+		}
+		return sel, nil
+	}
+
+	raw, ok, cErr := st.getMeta(ctx, areaCacheKey)
+	if cErr != nil || !ok {
+		return areaSelector{}, err
+	}
+	var cache resolvedArea
+	if jErr := json.Unmarshal([]byte(raw), &cache); jErr != nil {
+		return areaSelector{}, err
+	}
+	log.Warn("could not reach the Turf API, using the cached area resolution", "err", err)
+
+	fallback := areaSelector{
+		countries: map[string]bool{},
+		regions:   map[int64]bool{},
+		areas:     map[int64]bool{},
+	}
+	for _, country := range cfg.Countries {
+		if country = strings.ToLower(strings.TrimSpace(country)); country != "" {
+			fallback.countries[country] = true
+		}
+	}
+	for id, name := range cache.Regions {
+		fallback.regions[id] = true
+		fallback.regionName = name
+	}
+	for id := range cache.Areas {
+		fallback.areas[id] = true
+	}
+	fallback.summary = cmp.Or(fallback.regionName, "cached area") + " (cached)"
+	return fallback, nil
 }
 
 // resolveSelector turns configuration into a selector. Regions and areas may be
@@ -344,23 +354,24 @@ func countryList(countries map[string]bool) string {
 func idLabels(ids map[int64]bool, names map[int64]string) []string {
 	out := make([]string, 0, len(ids))
 	for id := range ids {
-		if name := names[id]; name != "" {
-			out = append(out, fmt.Sprintf("%s(%d)", name, id))
-		} else {
-			out = append(out, strconv.FormatInt(id, 10))
-		}
+		out = append(out, cmp.Or(
+			label(names[id], id),
+			strconv.FormatInt(id, 10),
+		))
 	}
 	slices.Sort(out)
 	return out
 }
 
-func sortedKeys(m map[string]bool) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
+func label(name string, id int64) string {
+	if name == "" {
+		return ""
 	}
-	slices.Sort(out)
-	return out
+	return fmt.Sprintf("%s(%d)", name, id)
+}
+
+func sortedKeys(m map[string]bool) []string {
+	return slices.Sorted(maps.Keys(m))
 }
 
 // ---------------------------------------------------------------------------
@@ -383,18 +394,9 @@ type exporter struct {
 	// last discovery scan. Written by scanLoop, read by the stats refresher.
 	areaZones atomic.Pointer[map[int64]int]
 
-	rank        rankBy
 	boards      []board
-	discovery   areaSelector
 	pinnedNames []string
 	pinnedIDs   []int64
-
-	// firstScan closes once the discovery scan has finished its first attempt.
-	// The stats refresher waits for it so that a cold start ranks the players the
-	// scan found, instead of an empty roster it would then sit on for a full
-	// refresh interval.
-	firstScan     chan struct{}
-	firstScanOnce sync.Once
 
 	// feedCursorUnix is the newest event time processed, as a Unix timestamp (0
 	// for none). Atomic because the feed loop writes it and the status page reads
@@ -438,13 +440,18 @@ func newExporter(ctx context.Context, cfg Config, log, events *slog.Logger) (*ex
 
 	client := newTurfClient(cfg.APIBaseURL, cfg.APIMinInterval, cfg.APIMaxRetries, log, metrics)
 
-	sel, err := resolveSelector(ctx, client, cfg.Countries, cfg.Regions, cfg.Areas)
+	// The store opens first so that resolving the area can fall back to what it
+	// cached last time. Otherwise the Turf API being unreachable at boot would
+	// stop the process before it could serve the leaderboards it already has —
+	// which is exactly the outage the cache exists for.
+	st, err := openStore(ctx, cfg.DBPath, log)
 	if err != nil {
 		return nil, err
 	}
 
-	st, err := openStore(ctx, cfg.DBPath, log)
+	sel, err := resolveArea(ctx, client, st, cfg, log)
 	if err != nil {
+		_ = st.Close()
 		return nil, err
 	}
 
@@ -464,17 +471,10 @@ func newExporter(ctx context.Context, cfg Config, log, events *slog.Logger) (*ex
 		metrics:     metrics,
 		players:     newPlayerCollector(),
 		registry:    registry,
-		rank:        rankBy(cfg.RankBy),
 		boards:      sel.boards(cfg.CountryBoard),
 		pinnedNames: names,
 		pinnedIDs:   ids,
-		firstScan:   make(chan struct{}),
 		startedAt:   time.Now(),
-	}
-	if cfg.CountryBoard {
-		e.discovery = sel.broadened()
-	} else {
-		e.discovery = sel
 	}
 	registry.MustRegister(e.players)
 
@@ -487,7 +487,7 @@ func newExporter(ctx context.Context, cfg Config, log, events *slog.Logger) (*ex
 	for i, b := range e.boards {
 		titles[i] = b.Title
 	}
-	e.log.Info("leaderboards", "boards", strings.Join(titles, ", "), "scope", string(cfg.RosterScope))
+	e.log.Info("leaderboards", "boards", strings.Join(titles, ", "), "source", "/users/top")
 	return e, nil
 }
 
@@ -510,56 +510,29 @@ func (e *exporter) run(ctx context.Context) error {
 	return g.Wait()
 }
 
-// warmStart publishes the stats stored by the previous run, so /metrics is
-// useful immediately instead of empty until the first refresh completes.
+// warmStart publishes the leaderboards cached by the previous run, so the pages
+// and /metrics are useful from the first second. The refresh that replaces them
+// is only moments away — but if the Turf API happens to be unreachable at
+// startup, this is the difference between showing yesterday's standings and
+// showing nothing at all.
 func (e *exporter) warmStart(ctx context.Context) {
-	now := time.Now()
-	roster, err := e.store.roster(ctx, now.Add(-e.cfg.RosterTTL))
+	samples, err := e.store.cachedLeaderboards(ctx)
 	if err != nil {
-		e.log.Warn("could not read roster", "err", err)
+		e.log.Warn("could not load cached leaderboards", "err", err)
 		return
-	}
-	if len(roster) == 0 {
-		return
-	}
-	onRoster := make(map[int64]bool, len(roster))
-	pinned := make(map[int64]bool, len(e.pinnedIDs))
-	for _, id := range e.pinnedIDs {
-		pinned[id] = true
-	}
-	for _, p := range roster {
-		onRoster[p.ID] = true
-		if p.Pinned {
-			pinned[p.ID] = true
-		}
-	}
-
-	stored, err := e.store.loadStats(ctx)
-	if err != nil {
-		e.log.Warn("could not load stored player stats", "err", err)
-		return
-	}
-	// Rank only current roster members: stats outlive the roster by design, and
-	// ranking a departed player would show a stale name at the top of the list.
-	samples := make([]playerSample, 0, len(stored))
-	for _, s := range stored {
-		if onRoster[s.User.ID] {
-			samples = append(samples, s)
-		}
 	}
 	if len(samples) == 0 {
 		return
 	}
-	if counts, err := e.store.takeoverCounts(ctx, now.Add(-e.cfg.TakeoverRetention)); err == nil {
+	if counts, err := e.store.takeoverCounts(ctx, time.Now().Add(-e.cfg.TakeoverRetention)); err == nil {
 		for i := range samples {
 			samples[i].ObservedTakeovers = counts[samples[i].User.ID]
 		}
 	}
-	ranked := e.rankSamples(samples, pinned)
-	e.players.set(ranked)
-	e.metrics.exposedPlayers.Set(float64(len(ranked)))
-	e.log.Info("published stored player stats while waiting for first refresh",
-		"roster", len(roster), "stored", len(samples), "exposed", len(ranked))
+	e.players.set(samples)
+	e.metrics.exposedPlayers.Set(float64(len(samples)))
+	e.log.Info("published cached leaderboards while waiting for the first refresh",
+		"players", len(samples), "cached_at", relativeTime(samples[0].UpdatedAt))
 }
 
 // ---------------------------------------------------------------------------
@@ -613,7 +586,7 @@ func (e *exporter) pollFeed(ctx context.Context) error {
 		if !ok {
 			continue
 		}
-		monitoredEvent := e.discovery.matches(ev.eventRegion())
+		monitoredEvent := e.sel.matches(ev.eventRegion())
 		e.metrics.feedTakeovers.WithLabelValues(t.Country, boolLabel(monitoredEvent)).Inc()
 		inArea[keyOf(t)] = monitoredEvent
 
@@ -636,10 +609,6 @@ func (e *exporter) pollFeed(ctx context.Context) error {
 		if e.cfg.FeedLog.includes(inArea[keyOf(t)]) {
 			e.logTakeover(ctx, t)
 		}
-	}
-
-	if err := e.recordTakeoverPlayers(ctx, monitored); err != nil {
-		return err
 	}
 
 	if newest.After(e.cursor()) {
@@ -672,28 +641,6 @@ func (e *exporter) feedAfter(now time.Time) time.Time {
 		return candidate
 	}
 	return floor
-}
-
-// recordTakeoverPlayers adds both sides of a takeover to the roster: the taker
-// is obviously active in the area, and so is whoever they took the zone from.
-func (e *exporter) recordTakeoverPlayers(ctx context.Context, takeovers []takeover) error {
-	if len(takeovers) == 0 {
-		return nil
-	}
-	seen := make(map[int64]bool, len(takeovers)*2)
-	owners := make([]Owner, 0, len(takeovers)*2)
-	add := func(id int64, name string) {
-		if id == 0 || name == "" || seen[id] {
-			return
-		}
-		seen[id] = true
-		owners = append(owners, Owner{ID: id, Name: name})
-	}
-	for _, t := range takeovers {
-		add(t.TakerID, t.TakerName)
-		add(t.PreviousOwnerID, t.PreviousOwnerName)
-	}
-	return e.store.seePlayers(ctx, owners, time.Now(), false)
 }
 
 func (e *exporter) logTakeover(ctx context.Context, t takeover) {
@@ -732,21 +679,20 @@ func (e *exporter) scanTiles() []bbox {
 	return tiles
 }
 
-// scanLoop enumerates zones in the configured bounding boxes to discover players.
-// It is what makes the roster useful from the first minute: the takeover feed is
-// global, and in a 30-minute sample only 12 of 3413 takeovers were Danish, so
-// waiting for the feed alone to reveal the local player base would take days. A
-// zone scan names every current zone holder in the area in one pass.
+// scanLoop enumerates zones in the configured bounding boxes.
+//
+// It no longer discovers anyone — /users/top does that far better — so all it
+// contributes now is turf_player_area_zones: how much ground each player holds
+// inside the monitored area, which is a local measure the leaderboards, being
+// about a player's global score, cannot show.
 func (e *exporter) scanLoop(ctx context.Context) error {
 	if !e.cfg.ScanEnabled {
-		e.log.Info("zone discovery scan disabled")
-		e.scanFinished()
+		e.log.Info("zone scan disabled")
 		return nil
 	}
 	e.metrics.scanTiles.Set(float64(len(e.scanTiles())))
-	return e.everyTick(ctx, e.cfg.ScanInterval, "zone discovery scan", func() error {
+	return e.everyTick(ctx, e.cfg.ScanInterval, "zone scan", func() error {
 		err := e.scanZones(ctx)
-		e.scanFinished() // release the stats refresher, successfully or not
 		e.metrics.scans.WithLabelValues(outcomeLabel(err)).Inc()
 		if err == nil {
 			e.metrics.scanTime.Set(float64(time.Now().Unix()))
@@ -777,7 +723,7 @@ func (e *exporter) scanZones(ctx context.Context) error {
 				continue
 			}
 			seenZone[z.ID] = true
-			if !e.discovery.matches(z.Region) {
+			if !e.sel.matches(z.Region) {
 				outside++
 				continue
 			}
@@ -791,14 +737,6 @@ func (e *exporter) scanZones(ctx context.Context) error {
 			"box", tile.String(), "zones", len(zones))
 	}
 
-	list := make([]Owner, 0, len(owners))
-	for _, o := range owners {
-		list = append(list, o)
-	}
-	if err := e.store.seePlayers(ctx, list, time.Now(), false); err != nil {
-		return err
-	}
-
 	e.areaZones.Store(&zonesPerOwner)
 	e.metrics.scanZones.WithLabelValues("true").Set(float64(inArea))
 	e.metrics.scanZones.WithLabelValues("false").Set(float64(outside))
@@ -810,47 +748,15 @@ func (e *exporter) scanZones(ctx context.Context) error {
 }
 
 // ---------------------------------------------------------------------------
-// Player stats and the local top list
+// Leaderboards
 // ---------------------------------------------------------------------------
 
-// rankBy names the stat the local top list is ordered by.
-type rankBy string
-
-var rankFuncs = map[rankBy]func(playerSample) int64{
-	"points":        func(s playerSample) int64 { return s.User.Points },
-	"totalPoints":   func(s playerSample) int64 { return s.User.TotalPoints },
-	"pointsPerHour": func(s playerSample) int64 { return s.User.PointsPerHour },
-	"taken":         func(s playerSample) int64 { return s.User.Taken },
-	"zones":         func(s playerSample) int64 { return int64(len(s.User.Zones)) },
-	"areaZones":     func(s playerSample) int64 { return int64(s.AreaZones) },
-}
-
-func (r rankBy) valid() bool {
-	_, ok := rankFuncs[r]
-	return ok
-}
-
-// rankByValues lists the accepted ranking keys, for flag help.
-func rankByValues() string {
-	out := make([]string, 0, len(rankFuncs))
-	for k := range rankFuncs {
-		out = append(out, string(k))
-	}
-	sort.Strings(out)
-	return strings.Join(out, ", ")
-}
-
-// statsLoop refreshes player stats and republishes the top list.
+// statsLoop refetches every leaderboard and republishes it.
 //
-// The API has no leaderboard endpoint, so "top list" here means: of the players
-// discovered in the monitored area, these are the highest ranked. One POST /users
-// carries up to 400 players, so the whole refresh costs one or two requests.
+// /users/top returns each board already ranked and complete, so there is no
+// local ordering to choose and nothing to discover first. One request per board,
+// plus one /users call to read the whole set back with global figures.
 func (e *exporter) statsLoop(ctx context.Context) error {
-	select {
-	case <-e.firstScan:
-	case <-ctx.Done():
-		return nil
-	}
 	return e.everyTick(ctx, e.cfg.StatsInterval, "player stats refresh", func() error {
 		err := e.refreshStats(ctx)
 		e.metrics.refreshes.WithLabelValues(outcomeLabel(err)).Inc()
@@ -863,26 +769,68 @@ func (e *exporter) statsLoop(ctx context.Context) error {
 
 func (e *exporter) refreshStats(ctx context.Context) error {
 	now := time.Now()
-	roster, err := e.store.roster(ctx, now.Add(-e.cfg.RosterTTL))
-	if err != nil {
-		return err
-	}
-	e.metrics.rosterPlayers.Set(float64(len(roster)))
 
-	refs, pinned := e.userRefs(roster)
+	// One request per board returns that board's ranking, in order, complete.
+	// Nothing has to be discovered, and nothing can be missing.
+	positions := make(map[int64]map[string]int)
+	wanted := make(map[int64]bool)
+	names := make(map[int64]string)
+	for _, b := range e.boards {
+		top, err := e.client.usersTop(ctx, b.query)
+		if err != nil {
+			return err
+		}
+		for i, u := range top {
+			if u.ID == 0 {
+				continue
+			}
+			if i >= e.cfg.TopN {
+				break
+			}
+			if positions[u.ID] == nil {
+				positions[u.ID] = make(map[string]int, len(e.boards))
+			}
+			// Prefer the place the API localized to this board; fall back to the
+			// response order if it is missing.
+			place := int(u.Place)
+			if place <= 0 {
+				place = i + 1
+			}
+			positions[u.ID][b.Key] = place
+			wanted[u.ID] = true
+			names[u.ID] = u.Name
+		}
+		e.log.Debug("fetched leaderboard", "board", b.Key, "players", len(top))
+	}
+
+	// The board listings carry `place` localized to the board, so a second call
+	// re-reads everyone through /users to get consistent global figures — chiefly
+	// turf_player_place, which means the global position everywhere else.
+	refs := make([]UserRef, 0, len(wanted)+len(e.pinnedNames)+len(e.pinnedIDs))
+	for id := range wanted {
+		refs = append(refs, UserRef{ID: id})
+	}
+	pinned := make(map[int64]bool, len(e.pinnedIDs))
+	for _, id := range e.pinnedIDs {
+		pinned[id] = true
+		if !wanted[id] {
+			refs = append(refs, UserRef{ID: id})
+		}
+	}
+	for _, name := range e.pinnedNames {
+		if !slices.ContainsFunc(refs, func(r UserRef) bool {
+			return strings.EqualFold(names[r.ID], name)
+		}) {
+			refs = append(refs, UserRef{Name: name})
+		}
+	}
 	if len(refs) == 0 {
-		e.log.Info("roster is empty, nothing to refresh yet")
+		e.log.Info("no players on any board yet")
 		return nil
 	}
 
 	users, err := e.client.users(ctx, refs)
 	if err != nil {
-		return err
-	}
-	// Pinned players given by name only get their id here, once the API has
-	// resolved the name for us. This also adds them to pinned, so they are
-	// exposed on this cycle rather than the next one.
-	if err := e.recordPinned(ctx, users, pinned, now); err != nil {
 		return err
 	}
 
@@ -896,34 +844,31 @@ func (e *exporter) refreshStats(ctx context.Context) error {
 
 	zonesInArea := e.areaZones.Load()
 	samples := make([]playerSample, 0, len(users))
-	// One player can be reached by more than one ref — an id and a name in
-	// -players, or a rename that leaves the roster holding the old name — and the
-	// API answers each ref separately. Two samples for one id would mean two
-	// series with identical labels, which the registry drops while quietly
-	// counting an error on every scrape.
+	// A player reachable by two refs — pinned by name and also placing on a board
+	// — is answered twice, and two samples for one id means two series with
+	// identical labels, which the registry drops while counting an error on every
+	// scrape.
 	seen := make(map[int64]bool, len(users))
-	local := make([]User, 0, len(users))
-	var visitors []int64
 	for _, u := range users {
-		if u.ID == 0 {
+		if u.ID == 0 || seen[u.ID] {
 			continue // an unresolved name: the API omits it rather than erring
 		}
-		if seen[u.ID] {
-			continue
-		}
 		seen[u.ID] = true
-		// Discovery finds whoever holds or takes a zone here, which includes
-		// visitors from abroad carrying their whole national score. Ranking those
-		// against locals buries the local leaderboard: nine of the top ten were
-		// Swedes passing through. Pinned players are exempt — they were asked for
-		// by name.
-		if e.cfg.RosterScope == scopeHome && !pinned[u.ID] && !e.matchesAnyBoard(&u) {
-			visitors = append(visitors, u.ID)
-			continue
+
+		wasPinned := pinned[u.ID]
+		for _, name := range e.pinnedNames {
+			if strings.EqualFold(u.Name, name) {
+				wasPinned = true
+			}
 		}
-		local = append(local, u)
+		if !wasPinned && positions[u.ID] == nil {
+			continue // dropped off a board between the two calls
+		}
+
 		s := playerSample{
 			User:              u,
+			Positions:         positions[u.ID],
+			Pinned:            wasPinned,
 			AreaZones:         -1,
 			ObservedTakeovers: counts[u.ID],
 			UpdatedAt:         now,
@@ -934,33 +879,16 @@ func (e *exporter) refreshStats(ctx context.Context) error {
 		samples = append(samples, s)
 	}
 
-	if err := e.store.saveStats(ctx, local, now); err != nil {
-		return err
-	}
-	// Forget visitors rather than carrying them: 75 of 101 discovered players
-	// were registered elsewhere, so keeping them would quadruple every batch and
-	// grow the roster without bound.
-	if len(visitors) > 0 {
-		if n, err := e.store.forgetPlayers(ctx, visitors); err != nil {
-			e.log.Warn("could not drop visiting players", "err", err)
-		} else if n > 0 {
-			e.log.Debug("dropped visiting players", "count", n)
-		}
-	}
-
-	// Snapshot every player we fetched, not just the ones that rank: someone
-	// outside today's top 50 is exactly who you want history for when they climb.
 	e.recordHistory(ctx, samples, now)
-
-	ranked := e.rankSamples(samples, pinned)
-	e.players.set(ranked)
-	e.metrics.exposedPlayers.Set(float64(len(ranked)))
+	if err := e.store.cacheLeaderboards(ctx, samples, now); err != nil {
+		e.log.Warn("could not cache leaderboards for warm start", "err", err)
+	}
+	e.players.set(samples)
+	e.metrics.exposedPlayers.Set(float64(len(samples)))
 	e.measureDB(ctx)
 
-	e.metrics.filteredPlayers.Set(float64(len(visitors)))
-	e.log.Info("refreshed player stats", "roster", len(roster),
-		"fetched", len(users), "visitors_dropped", len(visitors),
-		"exposed", len(ranked), "rank_by", string(e.rank))
+	e.log.Info("refreshed leaderboards", "boards", len(e.boards),
+		"exposed", len(samples), "top_n", e.cfg.TopN)
 	return nil
 }
 
@@ -1014,116 +942,6 @@ func (e *exporter) recordHistory(ctx context.Context, samples []playerSample, no
 	}
 }
 
-// userRefs builds the POST /users body: every roster player by id, plus pinned
-// players configured by name that the roster does not know yet.
-func (e *exporter) userRefs(roster []player) ([]UserRef, map[int64]bool) {
-	refs := make([]UserRef, 0, len(roster)+len(e.pinnedNames)+len(e.pinnedIDs))
-	pinned := make(map[int64]bool, len(e.pinnedIDs))
-	haveID := make(map[int64]bool, len(roster))
-	haveName := make(map[string]bool, len(roster))
-
-	for _, id := range e.pinnedIDs {
-		pinned[id] = true
-	}
-	for _, p := range roster {
-		refs = append(refs, UserRef{ID: p.ID})
-		haveID[p.ID] = true
-		haveName[strings.ToLower(p.Name)] = true
-		if p.Pinned {
-			pinned[p.ID] = true
-		}
-	}
-	for _, id := range e.pinnedIDs {
-		if !haveID[id] {
-			refs = append(refs, UserRef{ID: id})
-			haveID[id] = true
-		}
-	}
-	for _, name := range e.pinnedNames {
-		if !haveName[strings.ToLower(name)] {
-			refs = append(refs, UserRef{Name: name})
-		}
-	}
-	return refs, pinned
-}
-
-// recordPinned makes sure pinned players survive roster pruning, and that ones
-// given by name are stored with their id. It adds any name-configured player it
-// resolves to pinned, so the caller can rank them in the same cycle.
-func (e *exporter) recordPinned(ctx context.Context, users []User, pinned map[int64]bool, now time.Time) error {
-	wanted := make(map[string]bool, len(e.pinnedNames))
-	for _, n := range e.pinnedNames {
-		wanted[strings.ToLower(n)] = true
-	}
-	var owners []Owner
-	for _, u := range users {
-		if u.ID == 0 {
-			continue
-		}
-		if pinned[u.ID] || wanted[strings.ToLower(u.Name)] {
-			pinned[u.ID] = true
-			owners = append(owners, Owner{ID: u.ID, Name: u.Name})
-		}
-	}
-	return e.store.seePlayers(ctx, owners, now, true)
-}
-
-// rankSamples ranks players on every board and returns those worth exposing:
-// anyone who placed on at least one board, plus pinned players regardless.
-//
-// A player can hold a place on several boards at once — HappyF tops both
-// Hovedstaden and Denmark — so positions are per board rather than a single
-// number.
-func (e *exporter) rankSamples(samples []playerSample, pinned map[int64]bool) []playerSample {
-	value, ok := rankFuncs[e.rank]
-	if !ok {
-		value = rankFuncs["points"]
-	}
-
-	placed := make(map[int64]bool)
-	for _, b := range e.boards {
-		ranked := make([]*playerSample, 0, len(samples))
-		for i := range samples {
-			if b.match(&samples[i].User) {
-				ranked = append(ranked, &samples[i])
-			}
-		}
-		sort.SliceStable(ranked, func(i, j int) bool {
-			vi, vj := value(*ranked[i]), value(*ranked[j])
-			if vi != vj {
-				return vi > vj
-			}
-			return ranked[i].User.ID < ranked[j].User.ID // stable tie-break
-		})
-		for i, s := range ranked {
-			if i >= e.cfg.TopN {
-				break
-			}
-			if s.Positions == nil {
-				s.Positions = make(map[string]int, len(e.boards))
-			}
-			s.Positions[b.Key] = i + 1
-			placed[s.User.ID] = true
-		}
-	}
-
-	out := make([]playerSample, 0, len(samples))
-	for i := range samples {
-		s := samples[i]
-		s.Pinned = pinned[s.User.ID]
-		if placed[s.User.ID] || s.Pinned {
-			out = append(out, s)
-		}
-	}
-	return out
-}
-
-// matchesAnyBoard reports whether a player belongs on any leaderboard, which is
-// the test roster.scope=home applies.
-func (e *exporter) matchesAnyBoard(u *User) bool {
-	return slices.ContainsFunc(e.boards, func(b board) bool { return b.match(u) })
-}
-
 // ---------------------------------------------------------------------------
 // Retention
 // ---------------------------------------------------------------------------
@@ -1144,23 +962,6 @@ func (e *exporter) pruneLoop(ctx context.Context) error {
 			if n > 0 {
 				e.log.Info("pruned expired takeovers", "rows", n)
 			}
-		}
-		// Players are kept for twice the roster TTL: dropping them the moment
-		// they age off the roster would lose the first_seen history for anyone
-		// who simply took a fortnight off.
-		n, err := e.store.prunePlayers(ctx, now.Add(-2*e.cfg.RosterTTL))
-		if err != nil {
-			return err
-		}
-		if n > 0 {
-			e.log.Info("pruned inactive players", "rows", n)
-		}
-		orphans, err := e.store.pruneOrphanedStats(ctx)
-		if err != nil {
-			return err
-		}
-		if orphans > 0 {
-			e.log.Info("pruned stats for departed players", "rows", orphans)
 		}
 		// History is pruned by age only, deliberately not by roster membership:
 		// the point of keeping it is to still have the trend after someone stops
@@ -1186,12 +987,15 @@ func (e *exporter) pruneLoop(ctx context.Context) error {
 // from the internet, so /api/* carries the bearer token.
 func (e *exporter) publicMux() *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.Handle("/api/players", e.requireToken(http.HandlerFunc(e.handleAPIPlayers)))
-	mux.Handle("/api/history", e.requireToken(http.HandlerFunc(e.handleAPIHistory)))
-	mux.HandleFunc("/healthz", handleHealthz)
-	mux.HandleFunc("/zones", handleZoneMap)
-	mux.HandleFunc("/status", e.handleStatus)
-	mux.HandleFunc("/", e.handleLeaderboard)
+	// Method-and-path patterns: "GET /{$}" matches only the root, so handlers no
+	// longer have to check r.URL.Path themselves to avoid catching every unknown
+	// path, and anything unmatched 404s on its own.
+	mux.Handle("GET /api/players", e.requireToken(http.HandlerFunc(e.handleAPIPlayers)))
+	mux.Handle("GET /api/history", e.requireToken(http.HandlerFunc(e.handleAPIHistory)))
+	mux.HandleFunc("GET /healthz", handleHealthz)
+	mux.HandleFunc("GET /zones", handleZoneMap)
+	mux.HandleFunc("GET /status", e.handleStatus)
+	mux.HandleFunc("GET /{$}", e.handleLeaderboard)
 	return mux
 }
 
@@ -1205,13 +1009,13 @@ func (e *exporter) publicMux() *http.ServeMux {
 // is simply never published cannot be reached from outside in the first place.
 func (e *exporter) internalMux() *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.HandlerFor(e.registry, promhttp.HandlerOpts{
+	mux.Handle("GET /metrics", promhttp.HandlerFor(e.registry, promhttp.HandlerOpts{
 		// Serve what we have rather than failing the scrape, but say so — a
 		// collector inconsistency is otherwise completely invisible.
 		ErrorHandling: promhttp.ContinueOnError,
 		ErrorLog:      gatherLogger{e.log},
 	}))
-	mux.HandleFunc("/healthz", handleHealthz)
+	mux.HandleFunc("GET /healthz", handleHealthz)
 	return mux
 }
 
@@ -1268,11 +1072,7 @@ type boardView struct {
 
 // handleLeaderboard renders one tab per board. The snapshot it reads is the same
 // one /metrics serves, so the page cannot disagree with the metrics.
-func (e *exporter) handleLeaderboard(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
+func (e *exporter) handleLeaderboard(w http.ResponseWriter, _ *http.Request) {
 	samples := e.players.snapshot()
 	updated := time.Time{}
 	for _, s := range samples {
@@ -1286,9 +1086,9 @@ func (e *exporter) handleLeaderboard(w http.ResponseWriter, r *http.Request) {
 		rows := make([]leaderRow, 0, e.cfg.TopN)
 		for _, s := range samples {
 			pos, placed := s.Positions[b.Key]
-			// A pinned player is shown on every tab they could belong to, even
-			// unplaced — that is the point of pinning them.
-			if !placed && !(s.Pinned && b.match(&s.User)) {
+			// A pinned player who placed on no board is still shown, on every
+			// tab — that is the point of pinning them.
+			if !placed && !s.Pinned {
 				continue
 			}
 			rows = append(rows, leaderRow{
@@ -1297,18 +1097,13 @@ func (e *exporter) handleLeaderboard(w http.ResponseWriter, r *http.Request) {
 				Pinned: s.Pinned,
 			})
 		}
-		sort.SliceStable(rows, func(i, j int) bool {
-			pi, pj := rows[i].Position, rows[j].Position
-			switch {
-			case pi == pj:
-				return rows[i].Points > rows[j].Points
-			case pi == 0:
-				return false // unplaced sinks to the bottom
-			case pj == 0:
-				return true
-			default:
-				return pi < pj
-			}
+		slices.SortStableFunc(rows, func(a, b leaderRow) int {
+			// Unplaced rows (pinned players who did not place) sink to the bottom,
+			// so rank them as if their position were unreachable.
+			return cmp.Or(
+				cmp.Compare(orLast(a.Position), orLast(b.Position)),
+				cmp.Compare(b.Points, a.Points),
+			)
 		})
 		views = append(views, boardView{Key: b.Key, Title: b.Title, Players: rows})
 	}
@@ -1320,7 +1115,6 @@ func (e *exporter) handleLeaderboard(w http.ResponseWriter, r *http.Request) {
 	e.renderPage(w, "leaderboard.html", map[string]any{
 		"Title":   title,
 		"Boards":  views,
-		"RankBy":  rankLabel(e.rank),
 		"TopN":    e.cfg.TopN,
 		"Pinned":  strings.Join(e.cfg.Players, ", "),
 		"Updated": relativeTime(updated),
@@ -1363,11 +1157,7 @@ func (e *exporter) handleStatus(w http.ResponseWriter, r *http.Request) {
 // handleZoneMap serves the embedded zone ownership map. It calls the Turf API
 // directly from the browser, so it needs nothing from this process beyond being
 // handed to the client.
-func handleZoneMap(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/zones" {
-		http.NotFound(w, r)
-		return
-	}
+func handleZoneMap(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	_, _ = w.Write(zoneMapPage)
@@ -1399,23 +1189,6 @@ func (e *exporter) regionTitle() string {
 		return name
 	}
 	return e.sel.summary
-}
-
-func rankLabel(r rankBy) string {
-	switch r {
-	case "points":
-		return "round points"
-	case "totalPoints":
-		return "all-time points"
-	case "pointsPerHour":
-		return "points per hour"
-	case "taken":
-		return "takeovers"
-	case "areaZones":
-		return "zones held here"
-	default:
-		return string(r)
-	}
 }
 
 // humanBytes formats a byte count for people rather than for machines.
@@ -1688,9 +1461,12 @@ func (g gatherLogger) Println(v ...any) {
 	g.log.Error("error gathering metrics", "err", strings.TrimSpace(fmt.Sprintln(v...)))
 }
 
-// scanFinished releases anything waiting on the first discovery scan.
-func (e *exporter) scanFinished() {
-	e.firstScanOnce.Do(func() { close(e.firstScan) })
+// orLast maps "no position" to a value that sorts after every real one.
+func orLast(position int) int {
+	if position == 0 {
+		return math.MaxInt
+	}
+	return position
 }
 
 func outcomeLabel(err error) string {

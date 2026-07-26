@@ -485,6 +485,38 @@ func (c *turfClient) users(ctx context.Context, refs []UserRef) ([]User, error) 
 	return out, nil
 }
 
+// topQuery selects a leaderboard. Exactly one of Region or Country is set;
+// Region must be the region's *name* — a numeric id makes the endpoint return
+// HTTP 500.
+type topQuery struct {
+	Region  string `json:"region,omitempty"`
+	Country string `json:"country,omitempty"`
+	From    int    `json:"from"`
+	To      int    `json:"to"`
+}
+
+// maxTopUsers is how many entries one /users/top request returns. Windows past
+// the first 50 come back with `place` values that do not continue the sequence,
+// so paging beyond this is not trustworthy and is not attempted.
+const maxTopUsers = 50
+
+// usersTop returns a leaderboard in order, with `place` localized to the
+// requested region or country — the same list and the same numbering the game
+// shows in its own tabs.
+//
+// This is the endpoint that removes the need to discover players at all: the
+// ranking is authoritative and complete, where anything assembled from zone
+// ownership is necessarily partial.
+func (c *turfClient) usersTop(ctx context.Context, q topQuery) ([]User, error) {
+	q.From = 1
+	q.To = maxTopUsers
+	var out []User
+	if err := c.do(ctx, http.MethodPost, "/users/top", "users/top", q, &out); err != nil {
+		return nil, fmt.Errorf("users/top %s%s: %w", q.Region, q.Country, err)
+	}
+	return out, nil
+}
+
 // feed returns events of one type ("takeover", "zone", "medal", "chat"), or all
 // types when kind is empty. A non-zero after limits results to newer events; the
 // API silently returns whatever it retains if after predates its window.
