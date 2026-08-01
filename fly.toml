@@ -43,6 +43,15 @@ primary_region = "arn"
   size = "shared-cpu-1x"
   memory = "512mb"
 
+# Verifying a deploy: confirming /metrics answers is not enough — right after a
+# restart the series exists but may have no sample in Prometheus's 5-minute
+# lookback, so an instant query returns an empty result that looks like a break.
+# Query a range instead, and note it is `Authorization: FlyV1 …`, not `Bearer`:
+#
+#   curl -s -H "Authorization: FlyV1 $(fly auth token)" \
+#     --data-urlencode 'query=turf_exposed_players' \
+#     --data-urlencode "start=$(($(date +%s)-1800))" --data-urlencode "end=$(date +%s)" \
+#     --data-urlencode 'step=30' -G 'https://api.fly.io/prometheus/personal/api/v1/query_range'
 [deploy]
   strategy = "immediate"
 
