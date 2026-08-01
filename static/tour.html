@@ -212,9 +212,17 @@ function updateStatus() {
 
 // ---------- markers ----------
 function addZoneMarker(z) {
-  const m = L.circleMarker([z.latitude, z.longitude], { radius: 6, weight: 1.5, color: "#fff", fillColor: "#8a8f98", fillOpacity: 0.9 });
-  m.on("click", () => toggleZone(z.id));
-  m.bindTooltip(z.name, { direction: "top" });
+  const ll = [z.latitude, z.longitude];
+  // A large, invisible circle carries the tap so the target is finger-sized
+  // while the visible dot stays small and the map readable. fillOpacity 0 on an
+  // interactive Leaflet path is still tappable across its whole radius.
+  const hit = L.circleMarker(ll, { radius: 18, stroke: false, fill: true, fillOpacity: 0 });
+  hit.on("click", () => toggleZone(z.id));
+  hit.bindTooltip(z.name, { direction: "top" });
+  hit.addTo(zoneLayer);
+  // The visible dot is non-interactive so taps always fall through to the hit
+  // circle (avoids ambiguity where the two overlap).
+  const m = L.circleMarker(ll, { radius: 6, weight: 1.5, color: "#fff", fillColor: "#8a8f98", fillOpacity: 0.9, interactive: false });
   m.addTo(zoneLayer);
   markerById.set(z.id, m);
   styleMarker(z.id);
