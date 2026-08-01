@@ -15,9 +15,20 @@
     width: 310px; max-height: calc(100% - 20px); display: flex; flex-direction: column;
     background: rgba(255,255,255,0.95); border-radius: 12px;
     box-shadow: 0 4px 20px rgba(0,0,0,0.25); overflow: hidden;
+    transition: transform 0.2s ease, opacity 0.2s ease;
   }
+  .panel.hidden { transform: translateX(calc(-100% - 20px)); opacity: 0; pointer-events: none; }
   @media (prefers-color-scheme: dark) { .panel { background: rgba(30,30,34,0.95); color: #eee; } }
-  .panel header { padding: 12px 14px 8px; }
+  #toggle {
+    position: absolute; top: 10px; left: 10px; z-index: 1001;
+    width: 40px; height: 40px; padding: 0; border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px; line-height: 1; cursor: pointer;
+    background: rgba(255,255,255,0.95); color: inherit;
+    border: 1px solid rgba(128,128,128,0.4); box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+  }
+  @media (prefers-color-scheme: dark) { #toggle { background: rgba(30,30,34,0.95); color: #eee; } }
+  .panel header { padding: 12px 14px 8px; padding-left: 44px; }
   .panel h1 { font-size: 15px; margin: 0 0 2px; }
   .panel .sub { font-size: 11px; opacity: 0.65; }
   .controls { padding: 4px 14px 10px; display: flex; flex-direction: column; gap: 8px; }
@@ -56,24 +67,15 @@
 <body>
 <div id="map"></div>
 
+<button id="toggle" title="Show/hide panel">☰</button>
 <div class="panel">
   <header>
     <h1>Turf Zones — ownership</h1>
     <div class="sub">Live data from api.turfgame.com · v5</div>
   </header>
-  <div class="controls">
-    <button id="load" class="primary">Load zones in this view</button>
-    <div class="row">
-      <button id="locate">📍 Near me</button>
-      <button id="stop" disabled>Stop</button>
-      <button id="reset">Reset</button>
-    </div>
-  </div>
-  <div class="status" id="status">Move/zoom the map, then “Load zones in this view”.</div>
+  <div class="status" id="status">Locating…</div>
   <div class="filterbar">
     <input id="search" type="search" placeholder="Filter owners…" />
-    <button id="all">All</button>
-    <button id="none">None</button>
   </div>
   <div class="legend">
     <div class="legend-title" id="legend-title">Owners in view — tick to show only those</div>
@@ -93,7 +95,8 @@ const MAX_TILES = 60;          // safety cap on a single load
 const REQ_SPACING_MS = 1100;   // honour the API's 1 req/sec limit
 const RETRY_BACKOFF_MS = 1500;
 
-const map = L.map("map", { zoomControl: true }).setView(CPH, 13);
+const map = L.map("map", { zoomControl: false }).setView(CPH, 13);
+L.control.zoom({ position: "bottomright" }).addTo(map);
 L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
   attribution: '© OpenStreetMap © CARTO · zones © Turf', maxZoom: 20, subdomains: "abcd"
 }).addTo(map);
@@ -130,11 +133,7 @@ function ago(iso) {
 }
 function esc(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function setStatus(m) { document.getElementById("status").textContent = m; }
-function setBusy(b) {
-  document.getElementById("load").disabled = b;
-  document.getElementById("locate").disabled = b;
-  document.getElementById("stop").disabled = !b;
-}
+function setBusy(b) { /* no visible busy control; loadToken cancels stale loads */ }
 
 // ---- tiling -------------------------------------------------------------
 // Snap tiles to a fixed global grid (multiples of MAX_LAT/MAX_LNG) so a given
@@ -270,25 +269,30 @@ function applyFilter() {
 }
 
 // ---- events -------------------------------------------------------------
-document.getElementById("load").onclick = loadZones;
-document.getElementById("stop").onclick = () => { loadToken++; setBusy(false); setStatus(`Stopped · ${zonesById.size} zones loaded.`); };
-document.getElementById("reset").onclick = () => {
-  loadToken++; zonesById.clear(); coveredTiles.clear(); selected.clear();
-  render(); setBusy(false); setStatus("Cleared. Load zones in this view to start again.");
-};
 document.getElementById("search").addEventListener("input", buildLegend);
-document.getElementById("all").onclick = () => { for (const { owner } of markers) selected.add(owner); buildLegend(); applyFilter(); };
-document.getElementById("none").onclick = () => { selected.clear(); buildLegend(); applyFilter(); };
-document.getElementById("locate").onclick = () => {
-  setStatus("Locating…");
+document.getElementById("toggle").onclick = () => document.querySelector(".panel").classList.toggle("hidden");
+
+// Auto-load new tiles whenever the map settles after a pan/zoom.
+let moveTimer = null;
+function scheduleLoad() {
+  clearTimeout(moveTimer);
+  moveTimer = setTimeout(loadZones, 400);
+}
+map.on("moveend", scheduleLoad);
+map.on("zoomend", scheduleLoad);
+
+// ---- startup ------------------------------------------------------------
+// Start at the user's location if allowed; otherwise stay on Copenhagen.
+// Either way the resulting moveend (or the fallback below) triggers a load.
+if (navigator.geolocation) {
   navigator.geolocation.getCurrentPosition(
-    p => { map.setView([p.coords.latitude, p.coords.longitude], 14); loadZones(); },
-    () => setStatus("Location denied — pan the map manually, then Load."),
+    p => map.setView([p.coords.latitude, p.coords.longitude], 14),
+    () => loadZones(),
     { enableHighAccuracy: true, timeout: 10000 }
   );
-};
-
-loadZones();
+} else {
+  loadZones();
+}
 </script>
 </body>
 </html>
