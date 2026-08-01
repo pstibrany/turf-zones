@@ -44,6 +44,9 @@ var templateFS embed.FS
 //go:embed static/zones.html
 var zoneMapPage []byte
 
+//go:embed static/tour.html
+var tourPage []byte
+
 // pageTemplates is parsed once at startup: every page is rendered from memory,
 // so serving one never touches the database or the Turf API.
 var pageTemplates = template.Must(template.ParseFS(templateFS, "templates/*.html"))
@@ -996,6 +999,7 @@ func (e *exporter) publicMux() *http.ServeMux {
 	mux.HandleFunc("GET /api/graph", e.handleGraphData)
 	mux.HandleFunc("GET /api/activity", e.handleActivityData)
 	mux.HandleFunc("GET /zones", handleZoneMap)
+	mux.HandleFunc("GET /tour", handleTour)
 	mux.HandleFunc("GET /graphs", e.handleGraphs)
 	mux.HandleFunc("GET /activity", e.handleActivity)
 	mux.HandleFunc("GET /status", e.handleStatus)
@@ -1396,6 +1400,15 @@ func handleZoneMap(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	_, _ = w.Write(zoneMapPage)
+}
+
+// handleTour serves the embedded tour planner. Like the zone map it is
+// self-contained: it talks to the Turf API and the browser's geolocation
+// directly, needing nothing from this process.
+func handleTour(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	_, _ = w.Write(tourPage)
 }
 
 // renderPage renders into a buffer first, so a template error surfaces as a 500
