@@ -1063,6 +1063,10 @@ type leaderRow struct {
 	PointsPerHour int64
 	Zones         int
 	Pinned        bool
+	// CatchUp is how long, at the current points-per-hour of both players, this
+	// player would take to reach the one ranked directly above — "—" for the
+	// leader or when already ahead, "∞" when the gap is not closing.
+	CatchUp string
 }
 
 // boardView is one rendered tab.
@@ -1107,6 +1111,14 @@ func (e *exporter) handleLeaderboard(w http.ResponseWriter, _ *http.Request) {
 				cmp.Compare(b.Points, a.Points),
 			)
 		})
+		// Now that rows are in standing order, each one's target is the row above.
+		for i := range rows {
+			if i == 0 {
+				rows[i].CatchUp = "—"
+				continue
+			}
+			rows[i].CatchUp = catchUp(rows[i], rows[i-1])
+		}
 		views = append(views, boardView{Key: b.Key, Title: b.Title, Players: rows})
 	}
 
@@ -1577,6 +1589,36 @@ func orLast(position int) int {
 		return math.MaxInt
 	}
 	return position
+}
+
+// catchUp estimates how long `me` needs to reach `above`, assuming both keep
+// their current points-per-hour. It returns "—" when already level or ahead and
+// "∞" when the gap is not closing (the player above earns at least as fast).
+func catchUp(me, above leaderRow) string {
+	gap := above.Points - me.Points
+	if gap <= 0 {
+		return "—"
+	}
+	rate := me.PointsPerHour - above.PointsPerHour
+	if rate <= 0 {
+		return "∞"
+	}
+	return formatCatchup(float64(gap) / float64(rate))
+}
+
+// formatCatchup renders a span of hours compactly, picking the largest unit
+// that keeps the number small enough to read at a glance.
+func formatCatchup(hours float64) string {
+	switch {
+	case hours < 1:
+		return "<1h"
+	case hours < 48:
+		return fmt.Sprintf("%.0fh", math.Round(hours))
+	case hours < 24*14:
+		return fmt.Sprintf("%.0fd", math.Round(hours/24))
+	default:
+		return fmt.Sprintf("%.0fw", math.Round(hours/(24*7)))
+	}
 }
 
 func outcomeLabel(err error) string {
