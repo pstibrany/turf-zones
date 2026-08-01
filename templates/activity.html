@@ -36,6 +36,7 @@
   nav { margin: 0 0 14px; padding: 0 4px; font-size: 13px; display: flex; gap: 16px; }
   nav a { color: var(--accent); text-decoration: none; }
   nav a:hover { text-decoration: underline; }
+  nav .here { color: var(--muted); font-weight: 600; }
 
   .card {
     background: var(--card); border-radius: 14px;
@@ -142,9 +143,8 @@
   <nav>
     <a href="/">Leaderboard</a>
     <a href="/zones">Zone map</a>
-    <a href="/tour">Tour</a>
     <a href="/graphs">History</a>
-    <a href="/activity">Activity</a>
+    <span class="here">Activity</span>
     <a href="/status">Status</a>
   </nav>
 

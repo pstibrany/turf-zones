@@ -56,6 +56,7 @@
   nav { margin: 0 0 4px; padding: 0 4px; font-size: 13px; display: flex; gap: 16px; }
   nav a { color: var(--accent); text-decoration: none; }
   nav a:hover { text-decoration: underline; }
+  nav .here { color: var(--muted); font-weight: 600; }
 
   @media (max-width: 400px) {
     body { font-size: 14px; }
@@ -65,7 +66,7 @@
 </head>
 <body>
 <main>
-  <nav><a href="/">Leaderboard</a><a href="/zones">Zone map</a><a href="/tour">Tour</a><a href="/graphs">History</a><a href="/activity">Activity</a></nav>
+  <nav><a href="/">Leaderboard</a><a href="/zones">Zone map</a><a href="/graphs">History</a><a href="/activity">Activity</a><span class="here">Status</span></nav>
 
   <header>
     <h1>Status</h1>
