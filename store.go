@@ -622,6 +622,30 @@ func (s *store) pruneHistory(ctx context.Context, before time.Time) (int64, erro
 	return res.RowsAffected()
 }
 
+// historyPlayerNames returns the distinct player names that appear in stored
+// history, most recently seen first, so the graphs picker can offer everyone we
+// have data for rather than only the current top list.
+func (s *store) historyPlayerNames(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT name FROM player_history
+		GROUP BY name COLLATE NOCASE
+		ORDER BY MAX(ts) DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("history player names: %w", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, name)
+	}
+	return out, rows.Err()
+}
+
 // countHistory returns the number of stored snapshot rows.
 func (s *store) countHistory(ctx context.Context) (int64, error) {
 	var n int64

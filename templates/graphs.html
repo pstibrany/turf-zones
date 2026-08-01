@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="light dark" />
+<title>Turf — History</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f6f8; --card: #ffffff; --ink: #16181d;
+    --muted: #6b7280; --line: rgba(0,0,0,0.08); --accent: #007aff;
+    --grid: rgba(0,0,0,0.07);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #131418; --card: #1c1e24; --ink: #e8e9ec;
+      --muted: #9aa0aa; --line: rgba(255,255,255,0.10); --accent: #4da3ff;
+      --grid: rgba(255,255,255,0.08);
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: max(12px, env(safe-area-inset-top)) 12px calc(24px + env(safe-area-inset-bottom));
+  }
+  main { max-width: 720px; margin: 0 auto; }
+  header { padding: 4px 4px 12px; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+
+  nav { margin: 0 0 14px; padding: 0 4px; font-size: 13px; display: flex; gap: 16px; }
+  nav a { color: var(--accent); text-decoration: none; }
+  nav a:hover { text-decoration: underline; }
+
+  .card {
+    background: var(--card); border-radius: 14px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.06), 0 4px 16px rgba(0,0,0,0.05);
+    margin-bottom: 12px; padding: 14px;
+  }
+  .card h2 {
+    margin: 0 0 10px; font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted);
+  }
+
+  .picker { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .picker input[type=text] {
+    flex: 1; min-width: 180px; font: inherit; color: var(--ink);
+    background: var(--bg); border: 1px solid var(--line); border-radius: 10px;
+    padding: 8px 10px;
+  }
+  .picker select, .picker button {
+    font: inherit; color: var(--ink); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px;
+    cursor: pointer;
+  }
+  .picker button { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 550; }
+  .picker button:active { transform: translateY(1px); }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 12px; margin: 4px 0 10px; font-size: 12.5px; }
+  .legend span { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); }
+  .legend i { width: 11px; height: 11px; border-radius: 3px; display: inline-block; }
+
+  .plot { position: relative; }
+  svg { width: 100%; height: auto; display: block; touch-action: none; }
+  .axis { fill: var(--muted); font-size: 10px; }
+  .gridline { stroke: var(--grid); stroke-width: 1; }
+  .empty { color: var(--muted); font-size: 13.5px; padding: 8px 2px; }
+  .overlay { fill: transparent; cursor: crosshair; }
+  .crosshair { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; pointer-events: none; }
+  .marker { stroke: var(--card); stroke-width: 1.5; pointer-events: none; }
+  .selection { fill: var(--accent); opacity: 0.12; pointer-events: none; }
+
+  .tooltip {
+    position: absolute; pointer-events: none; z-index: 3;
+    background: var(--card); color: var(--ink);
+    border: 1px solid var(--line); border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+    padding: 7px 9px; font-size: 12px; line-height: 1.5;
+    min-width: 90px; opacity: 0; transition: opacity 0.08s;
+  }
+  .tooltip .tt-date { color: var(--muted); font-size: 11px; margin-bottom: 3px; }
+  .tooltip .tt-row { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .tooltip .tt-row i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+  .tooltip .tt-row b { margin-left: auto; font-variant-numeric: tabular-nums; }
+  .hint { color: var(--muted); font-size: 11.5px; margin-top: 8px; }
+  .hint button {
+    font: inherit; color: var(--accent); background: none; border: none;
+    padding: 0; cursor: pointer; text-decoration: underline;
+  }
+  .hint button[disabled] { color: var(--muted); cursor: default; text-decoration: none; }
+
+  @media (max-width: 400px) { body { font-size: 14px; } }
+</style>
+</head>
+<body>
+<main>
+  <nav>
+    <a href="/">Leaderboard</a>
+    <a href="/zones">Zone map</a>
+    <a href="/graphs">History</a>
+    <a href="/status">Status</a>
+  </nav>
+
+  <header>
+    <h1>History</h1>
+    <div class="sub">Points and zones over the last 30 days</div>
+  </header>
+
+  <div class="card">
+    <h2>Players</h2>
+    <div class="picker">
+      <input type="text" id="names" list="known" placeholder="Enter player names, comma-separated"
+             autocapitalize="off" autocorrect="off" spellcheck="false" />
+      <datalist id="known">
+        {{ range .Players }}<option value="{{ . }}"></option>{{ end }}
+      </datalist>
+      <select id="add">
+        <option value="">Add from list…</option>
+        {{ range .Players }}<option value="{{ . }}">{{ . }}</option>{{ end }}
+      </select>
+      <button id="show">Show</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Points</h2>
+    <div class="legend" id="legend-points"></div>
+    <div class="plot" id="chart-points"></div>
+  </div>
+
+  <div class="card">
+    <h2>Zones</h2>
+    <div class="legend" id="legend-zones"></div>
+    <div class="plot" id="chart-zones"></div>
+  </div>
+
+  <p class="hint">Drag across a chart to zoom · <button id="reset" disabled>reset zoom</button></p>
+</main>
+
+<script>
+const COLORS = [
+  "#007aff", "#ff9500", "#34c759", "#ff2d55", "#af52de",
+  "#5ac8fa", "#ffcc00", "#ff3b30", "#8e8e93", "#00c7be",
+];
+
+// The two charts share a time axis, so zooming is stored once and applied to
+// both. RAW holds the last fetched series; DOMAIN is the current time window
+// ({t0,t1}) or null for the full extent.
+const CHARTS_CFG = [
+  { chartId: "chart-points", legendId: "legend-points", field: "points" },
+  { chartId: "chart-zones", legendId: "legend-zones", field: "zones" },
+];
+let RAW = [];
+let DOMAIN = null;
+
+const namesInput = document.getElementById("names");
+const addSelect = document.getElementById("add");
+const showBtn = document.getElementById("show");
+const resetBtn = document.getElementById("reset");
+
+resetBtn.addEventListener("click", () => { DOMAIN = null; drawAll(); });
+
+addSelect.addEventListener("change", () => {
+  const v = addSelect.value;
+  addSelect.value = "";
+  if (!v) return;
+  const cur = parseNames(namesInput.value);
+  if (!cur.some((n) => n.toLowerCase() === v.toLowerCase())) {
+    cur.push(v);
+    namesInput.value = cur.join(", ");
+  }
+  load();
+});
+showBtn.addEventListener("click", load);
+namesInput.addEventListener("keydown", (e) => { if (e.key === "Enter") load(); });
+
+function parseNames(s) {
+  return s.split(",").map((x) => x.trim()).filter((x) => x.length > 0);
+}
+
+function syncURL(names) {
+  const u = new URL(window.location);
+  if (names.length) u.searchParams.set("players", names.join(","));
+  else u.searchParams.delete("players");
+  history.replaceState(null, "", u);
+}
+
+async function load() {
+  const names = parseNames(namesInput.value);
+  syncURL(names);
+  if (!names.length) {
+    renderEmpty("chart-points", "legend-points");
+    renderEmpty("chart-zones", "legend-zones");
+    return;
+  }
+  const q = names.map((n) => "player=" + encodeURIComponent(n)).join("&");
+  try {
+    const resp = await fetch("/api/graph?days=30&" + q);
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    RAW = await resp.json();
+  } catch (err) {
+    RAW = [];
+    renderEmpty("chart-points", "legend-points", "Failed to load: " + err.message);
+    renderEmpty("chart-zones", "legend-zones", "Failed to load: " + err.message);
+    return;
+  }
+  DOMAIN = null; // a fresh selection starts fully zoomed out
+  drawAll();
+}
+
+// drawAll redraws both charts from RAW under the current DOMAIN and keeps the
+// reset button's enabled state in sync.
+function drawAll() {
+  resetBtn.disabled = DOMAIN === null;
+  for (const c of CHARTS_CFG) drawChart(c.chartId, c.legendId, RAW, c.field);
+}
+
+function renderEmpty(chartId, legendId, msg) {
+  document.getElementById(legendId).innerHTML = "";
+  document.getElementById(chartId).innerHTML =
+    '<div class="empty">' + (msg || "Enter one or more player names above.") + "</div>";
+}
+
+// drawChart renders a multi-series line chart as inline SVG and wires up hover
+// tooltips and drag-to-zoom. Each series is {player, t:[], points:[], zones:[]};
+// `field` picks which value array to plot. The x-domain honours the shared
+// DOMAIN; the y-domain autoscales to whatever falls inside it.
+function drawChart(chartId, legendId, series, field) {
+  const container = document.getElementById(chartId);
+  const all = series.filter((s) => s.t && s.t.length > 0);
+  if (!all.length) {
+    renderEmpty(chartId, legendId, "No history for the selected players yet.");
+    return;
+  }
+
+  const W = 700, H = 280;
+  const m = { top: 12, right: 14, bottom: 26, left: 48 };
+  const iw = W - m.left - m.right, ih = H - m.top - m.bottom;
+
+  // Full time extent across every series; DOMAIN narrows it when zoomed.
+  let fMin = Infinity, fMax = -Infinity;
+  for (const s of all) {
+    if (s.t[0] < fMin) fMin = s.t[0];
+    if (s.t[s.t.length - 1] > fMax) fMax = s.t[s.t.length - 1];
+  }
+  let tMin = DOMAIN ? DOMAIN.t0 : fMin;
+  let tMax = DOMAIN ? DOMAIN.t1 : fMax;
+  if (tMin === tMax) tMax = tMin + 1;
+
+  // Autoscale the value axis to the points visible in the current window.
+  let vMin = Infinity, vMax = -Infinity;
+  for (const s of all) {
+    for (let i = 0; i < s.t.length; i++) {
+      if (s.t[i] < tMin || s.t[i] > tMax) continue;
+      const v = s[field][i];
+      if (v < vMin) vMin = v;
+      if (v > vMax) vMax = v;
+    }
+  }
+  if (!isFinite(vMin)) { vMin = 0; vMax = 1; }
+  if (vMin === vMax) { vMin -= 1; vMax += 1; }
+  const pad = (vMax - vMin) * 0.06;
+  // Points and zones are non-negative counts, so never let padding push the
+  // axis below zero — a negative floor is meaningless and looks wrong.
+  vMin = Math.max(0, Math.floor(vMin - pad));
+  vMax = Math.ceil(vMax + pad);
+
+  const x = (t) => m.left + ((t - tMin) / (tMax - tMin)) * iw;
+  const y = (v) => m.top + ih - ((v - vMin) / (vMax - vMin)) * ih;
+  const invX = (px) => tMin + ((px - m.left) / iw) * (tMax - tMin);
+
+  const clip = chartId + "-clip";
+  const parts = [];
+  parts.push('<svg viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="xMidYMid meet" role="img">');
+  parts.push('<defs><clipPath id="' + clip + '"><rect x="' + m.left + '" y="' + m.top +
+    '" width="' + iw + '" height="' + ih + '"/></clipPath></defs>');
+
+  // Horizontal grid + y labels.
+  const yticks = 4;
+  for (let i = 0; i <= yticks; i++) {
+    const v = vMin + ((vMax - vMin) * i) / yticks;
+    const yy = y(v);
+    parts.push('<line class="gridline" x1="' + m.left + '" y1="' + yy +
+      '" x2="' + (W - m.right) + '" y2="' + yy + '"/>');
+    parts.push('<text class="axis" x="' + (m.left - 6) + '" y="' + (yy + 3) +
+      '" text-anchor="end">' + fmtNum(Math.round(v)) + "</text>");
+  }
+
+  // X labels (start / mid / end of the visible window).
+  for (let i = 0; i <= 2; i++) {
+    const t = tMin + ((tMax - tMin) * i) / 2;
+    const xx = x(t);
+    const anchor = i === 0 ? "start" : i === 2 ? "end" : "middle";
+    parts.push('<text class="axis" x="' + xx + '" y="' + (H - 8) +
+      '" text-anchor="' + anchor + '">' + fmtDate(t) + "</text>");
+  }
+
+  const legendParts = [];
+  parts.push('<g clip-path="url(#' + clip + ')">');
+  all.forEach((s, idx) => {
+    const color = COLORS[idx % COLORS.length];
+    let d = "";
+    for (let i = 0; i < s.t.length; i++) {
+      d += (i === 0 ? "M" : "L") + x(s.t[i]).toFixed(1) + " " + y(s[field][i]).toFixed(1) + " ";
+    }
+    parts.push('<path d="' + d.trim() + '" fill="none" stroke="' + color +
+      '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>');
+    legendParts.push('<span><i style="background:' + color + '"></i>' +
+      escapeHTML(s.player) + "</span>");
+  });
+  parts.push("</g>");
+
+  // Interaction furniture, hidden until pointer activity.
+  parts.push('<line class="crosshair" style="visibility:hidden" y1="' + m.top +
+    '" y2="' + (m.top + ih) + '"/>');
+  parts.push('<rect class="selection" style="visibility:hidden" y="' + m.top +
+    '" height="' + ih + '" width="0"/>');
+  all.forEach((s, idx) => {
+    parts.push('<circle class="marker" r="3.5" style="visibility:hidden" fill="' +
+      COLORS[idx % COLORS.length] + '"/>');
+  });
+  parts.push('<rect class="overlay" x="' + m.left + '" y="' + m.top +
+    '" width="' + iw + '" height="' + ih + '"/>');
+  parts.push("</svg>");
+
+  container.innerHTML = parts.join("");
+  document.getElementById(legendId).innerHTML = legendParts.join("");
+
+  const tip = document.createElement("div");
+  tip.className = "tooltip";
+  container.appendChild(tip);
+
+  wireInteraction({
+    container, tip, all, field, x, y, invX, m, iw, ih,
+    svg: container.querySelector("svg"),
+    crosshair: container.querySelector(".crosshair"),
+    selection: container.querySelector(".selection"),
+    markers: container.querySelectorAll(".marker"),
+    overlay: container.querySelector(".overlay"),
+  });
+}
+
+// wireInteraction attaches hover and drag-zoom handlers to a freshly drawn
+// chart. Hover snaps to the nearest sample and fills the tooltip; a horizontal
+// drag sets the shared DOMAIN and redraws both charts.
+function wireInteraction(c) {
+  // Map a pointer event to a viewBox x-coordinate, honouring the SVG's scaling.
+  const toX = (evt) => {
+    const pt = c.svg.createSVGPoint();
+    pt.x = evt.clientX; pt.y = evt.clientY;
+    return pt.matrixTransform(c.svg.getScreenCTM().inverse()).x;
+  };
+
+  let dragging = false, dragStart = 0;
+
+  const hideHover = () => {
+    c.crosshair.style.visibility = "hidden";
+    c.markers.forEach((mk) => (mk.style.visibility = "hidden"));
+    c.tip.style.opacity = "0";
+  };
+
+  const showHover = (px) => {
+    const t = c.invX(px);
+    const rows = [];
+    c.all.forEach((s, idx) => {
+      const i = nearestIndex(s.t, t);
+      const sx = c.x(s.t[i]), sy = c.y(s[c.field][i]);
+      const mk = c.markers[idx];
+      mk.setAttribute("cx", sx.toFixed(1));
+      mk.setAttribute("cy", sy.toFixed(1));
+      mk.style.visibility = "visible";
+      rows.push('<div class="tt-row"><i style="background:' + COLORS[idx % COLORS.length] +
+        '"></i>' + escapeHTML(s.player) + "<b>" + fmtNum(s[c.field][i]) + "</b></div>");
+    });
+    // Snap the crosshair and tooltip date to the first series' nearest sample.
+    const ref = c.all[0];
+    const rt = ref.t[nearestIndex(ref.t, t)];
+    const cx = c.x(rt);
+    c.crosshair.setAttribute("x1", cx.toFixed(1));
+    c.crosshair.setAttribute("x2", cx.toFixed(1));
+    c.crosshair.style.visibility = "visible";
+
+    c.tip.innerHTML = '<div class="tt-date">' + fmtDateTime(rt) + "</div>" + rows.join("");
+    c.tip.style.opacity = "1";
+    positionTip(c, cx);
+  };
+
+  c.overlay.addEventListener("pointermove", (e) => {
+    const px = clamp(toX(e), c.m.left, c.m.left + c.iw);
+    if (dragging) {
+      const x0 = Math.min(dragStart, px), w = Math.abs(px - dragStart);
+      c.selection.setAttribute("x", x0.toFixed(1));
+      c.selection.setAttribute("width", w.toFixed(1));
+    } else {
+      showHover(px);
+    }
+  });
+  c.overlay.addEventListener("pointerleave", () => { if (!dragging) hideHover(); });
+
+  c.overlay.addEventListener("pointerdown", (e) => {
+    dragging = true;
+    dragStart = clamp(toX(e), c.m.left, c.m.left + c.iw);
+    c.selection.setAttribute("x", dragStart.toFixed(1));
+    c.selection.setAttribute("width", "0");
+    c.selection.style.visibility = "visible";
+    hideHover();
+    c.overlay.setPointerCapture(e.pointerId);
+  });
+
+  const endDrag = (e) => {
+    if (!dragging) return;
+    dragging = false;
+    c.selection.style.visibility = "hidden";
+    const px = clamp(toX(e), c.m.left, c.m.left + c.iw);
+    // Ignore an accidental micro-drag (or a plain click).
+    if (Math.abs(px - dragStart) < 6) return;
+    const t0 = c.invX(Math.min(dragStart, px));
+    const t1 = c.invX(Math.max(dragStart, px));
+    DOMAIN = { t0, t1 };
+    drawAll();
+  };
+  c.overlay.addEventListener("pointerup", endDrag);
+  c.overlay.addEventListener("pointercancel", () => { dragging = false; c.selection.style.visibility = "hidden"; });
+  // Double-click anywhere on a chart zooms back out.
+  c.overlay.addEventListener("dblclick", () => { DOMAIN = null; drawAll(); });
+}
+
+// positionTip places the tooltip beside the crosshair, flipping to the other
+// side when it would overflow the chart's right edge.
+function positionTip(c, cx) {
+  const rect = c.svg.getBoundingClientRect();
+  const scale = rect.width / 700; // viewBox width
+  const px = cx * scale;
+  const tw = c.tip.offsetWidth;
+  let left = px + 12;
+  if (left + tw > rect.width) left = px - tw - 12;
+  if (left < 0) left = 0;
+  c.tip.style.left = left + "px";
+  c.tip.style.top = "6px";
+}
+
+// nearestIndex returns the index of the sample time closest to t in a sorted
+// ascending array, via binary search.
+function nearestIndex(arr, t) {
+  let lo = 0, hi = arr.length - 1;
+  if (t <= arr[lo]) return lo;
+  if (t >= arr[hi]) return hi;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (arr[mid] < t) lo = mid + 1; else hi = mid;
+  }
+  return (lo > 0 && Math.abs(arr[lo - 1] - t) <= Math.abs(arr[lo] - t)) ? lo - 1 : lo;
+}
+
+function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+function fmtNum(n) {
+  return n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, "\u2009");
+}
+function fmtDate(unix) {
+  const d = new Date(unix * 1000);
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+function fmtDateTime(unix) {
+  const d = new Date(unix * 1000);
+  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+function escapeHTML(s) {
+  return s.replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// Initial selection: ?players= in the URL, else the configured defaults.
+(function init() {
+  const fromURL = new URL(window.location).searchParams.get("players");
+  const initial = fromURL !== null ? fromURL : {{ .Defaults }};
+  namesInput.value = initial;
+  load();
+})();
+</script>
+</body>
+</html>

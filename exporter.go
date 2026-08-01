@@ -38,7 +38,7 @@ const feedCursorKey = "feed.takeover.cursor"
 // and rendered, static/ is served verbatim — the zone map is a self-contained
 // page of HTML and JavaScript that would only be mangled by a template parser.
 //
-//go:embed templates/leaderboard.html templates/status.html
+//go:embed templates/leaderboard.html templates/status.html templates/graphs.html
 var templateFS embed.FS
 
 //go:embed static/zones.html
@@ -993,7 +993,9 @@ func (e *exporter) publicMux() *http.ServeMux {
 	mux.Handle("GET /api/players", e.requireToken(http.HandlerFunc(e.handleAPIPlayers)))
 	mux.Handle("GET /api/history", e.requireToken(http.HandlerFunc(e.handleAPIHistory)))
 	mux.HandleFunc("GET /healthz", handleHealthz)
+	mux.HandleFunc("GET /api/graph", e.handleGraphData)
 	mux.HandleFunc("GET /zones", handleZoneMap)
+	mux.HandleFunc("GET /graphs", e.handleGraphs)
 	mux.HandleFunc("GET /status", e.handleStatus)
 	mux.HandleFunc("GET /{$}", e.handleLeaderboard)
 	return mux
@@ -1119,6 +1121,114 @@ func (e *exporter) handleLeaderboard(w http.ResponseWriter, _ *http.Request) {
 		"Pinned":  strings.Join(e.cfg.Players, ", "),
 		"Updated": relativeTime(updated),
 	})
+}
+
+// handleGraphs renders the history charts page. It only supplies the list of
+// currently known players (for the picker) and the default selection; the
+// series themselves are fetched by the browser from /api/graph.
+func (e *exporter) handleGraphs(w http.ResponseWriter, r *http.Request) {
+	// The picker should offer everyone we have history for, not only the current
+	// top list — players drop off the top but their history remains. Seed the
+	// set from history, then fold in the current snapshot so a freshly pinned
+	// player with no stored rows yet still appears.
+	seen := map[string]bool{}
+	names := []string{}
+	add := func(n string) {
+		key := strings.ToLower(n)
+		if n != "" && !seen[key] {
+			seen[key] = true
+			names = append(names, n)
+		}
+	}
+
+	if hist, err := e.store.historyPlayerNames(r.Context()); err != nil {
+		e.log.Warn("listing history players for graphs picker", "err", err)
+	} else {
+		for _, n := range hist {
+			add(n)
+		}
+	}
+	for _, s := range e.players.snapshot() {
+		add(s.User.Name)
+	}
+	slices.SortFunc(names, func(a, b string) int {
+		return cmp.Compare(strings.ToLower(a), strings.ToLower(b))
+	})
+
+	// Default to the pinned players, falling back to nothing so the page still
+	// renders before the first refresh.
+	defaults := append([]string(nil), e.cfg.Players...)
+
+	e.renderPage(w, "graphs.html", map[string]any{
+		"Title":    "History",
+		"Players":  names,
+		"Defaults": strings.Join(defaults, ","),
+	})
+}
+
+// graphSeries is one player's history reshaped for charting: parallel arrays of
+// Unix seconds and values, which is what the client-side drawing code consumes.
+type graphSeries struct {
+	Player string  `json:"player"`
+	Times  []int64 `json:"t"`
+	Points []int64 `json:"points"`
+	Zones  []int64 `json:"zones"`
+}
+
+// handleGraphData serves per-player history for the charts page as JSON grouped
+// by player. Unlike /api/history this is public: it exposes the same points and
+// zone counts already shown on the leaderboard, only over time.
+func (e *exporter) handleGraphData(w http.ResponseWriter, r *http.Request) {
+	now := time.Now()
+	days := 30
+	if v := r.URL.Query().Get("days"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			httpError(w, http.StatusBadRequest, "days must be a positive integer")
+			return
+		}
+		days = min(n, 90)
+	}
+
+	q := historyQuery{
+		From:  now.AddDate(0, 0, -days),
+		To:    now,
+		Names: splitParams(r.URL.Query()["player"]),
+		Limit: 200000,
+	}
+	if len(q.Names) == 0 {
+		writeJSON(w, r, e.log, []graphSeries{})
+		return
+	}
+
+	rows, err := e.store.queryHistory(r.Context(), q)
+	if err != nil {
+		e.log.Error("graph query failed", "err", err)
+		httpError(w, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	// Group by player name, preserving the oldest-first order queryHistory
+	// already guarantees.
+	byName := map[string]*graphSeries{}
+	order := []string{}
+	for _, row := range rows {
+		s := byName[row.Name]
+		if s == nil {
+			s = &graphSeries{Player: row.Name}
+			byName[row.Name] = s
+			order = append(order, row.Name)
+		}
+		s.Times = append(s.Times, row.Time.Unix())
+		s.Points = append(s.Points, row.Points)
+		s.Zones = append(s.Zones, row.Zones)
+	}
+
+	out := make([]graphSeries, 0, len(order))
+	for _, name := range order {
+		out = append(out, *byName[name])
+	}
+	writeJSON(w, r, e.log, out)
 }
 
 // handleStatus renders operational state: how long the process has been up, how
