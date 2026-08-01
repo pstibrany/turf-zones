@@ -111,6 +111,13 @@
       <button id="gmaps">Full route in Google Maps ↗</button>
     </div>
     <div class="row">
+      <button id="runshortcut">Run in Shortcuts ↗</button>
+      <button id="copyjson">Copy tour</button>
+    </div>
+    <div class="row" style="font-size:11px;opacity:0.7;justify-content:center">
+      <span>First time? <a href="/turf-tour.shortcut" style="color:var(--accent)">Get the “Turf Tour” Shortcut</a></span>
+    </div>
+    <div class="row">
       <button id="live">Start live tracking</button>
     </div>
   </div>
@@ -331,7 +338,10 @@ function refresh() {
     list.appendChild(row);
   });
 
-  document.getElementById("gmaps").disabled = tour.length === 0;
+  const empty = tour.length === 0;
+  document.getElementById("gmaps").disabled = empty;
+  document.getElementById("runshortcut").disabled = empty;
+  document.getElementById("copyjson").disabled = empty;
   updateStatus();
 }
 
@@ -350,6 +360,36 @@ function openGoogle() {
   const url = "https://www.google.com/maps/dir/" + pts.map(encodeURIComponent).join("/") + "?travelmode=" + mode;
   if (note) setStatus("Opening Google Maps" + note);
   window.open(url, "_blank");
+}
+
+// ---------- Shortcuts export ----------
+// The tour is just coordinates the page already holds, so it can be handed to a
+// Shortcut directly — no server needed. We export the remaining stops in order.
+function appleMapsURL(z) { return `maps://?daddr=${z.latitude},${z.longitude}&dirflg=w`; }
+// Each stop carries a ready-to-open Apple Maps URL so the Shortcut needs no URL
+// building — it just loops and opens each one. lat/lng are included too in case
+// a Shortcut wants to build its own directions.
+function tourJSON() {
+  const ids = tour.filter(id => !reached.has(id));
+  const stops = ids.map((id, i) => {
+    const z = zonesById.get(id);
+    return { order: i + 1, name: z.name, lat: z.latitude, lng: z.longitude, url: appleMapsURL(z) };
+  });
+  return JSON.stringify({ stops });
+}
+async function copyJSON() {
+  if (!tour.length) return;
+  const text = tourJSON();
+  try { await navigator.clipboard.writeText(text); setStatus("Tour copied as JSON — in your Shortcut start with “Get Clipboard”."); }
+  catch (e) { setStatus("Copy failed (" + e.message + ") — long-press to select instead."); }
+}
+// Launch a Shortcut named "Turf Tour", passing the JSON as its input. Build the
+// Shortcut once; it receives the stops as Shortcut Input (text).
+function runShortcut() {
+  if (!tour.length) return;
+  const url = "shortcuts://run-shortcut?name=" + encodeURIComponent("Turf Tour") +
+    "&input=text&text=" + encodeURIComponent(tourJSON());
+  window.location.href = url;
 }
 
 // ---------- live tracking ----------
@@ -391,6 +431,8 @@ function onPosition(p) {
 document.getElementById("optimize").onclick = optimize;
 document.getElementById("clear").onclick = clearTour;
 document.getElementById("gmaps").onclick = openGoogle;
+document.getElementById("runshortcut").onclick = runShortcut;
+document.getElementById("copyjson").onclick = copyJSON;
 document.getElementById("live").onclick = toggleLive;
 document.getElementById("fromme").onchange = refresh;
 document.getElementById("mode").onchange = () => {};

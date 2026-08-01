@@ -47,6 +47,9 @@ var zoneMapPage []byte
 //go:embed static/tour.html
 var tourPage []byte
 
+//go:embed static/turf-tour.shortcut
+var tourShortcut []byte
+
 // pageTemplates is parsed once at startup: every page is rendered from memory,
 // so serving one never touches the database or the Turf API.
 var pageTemplates = template.Must(template.ParseFS(templateFS, "templates/*.html"))
@@ -1000,6 +1003,7 @@ func (e *exporter) publicMux() *http.ServeMux {
 	mux.HandleFunc("GET /api/activity", e.handleActivityData)
 	mux.HandleFunc("GET /zones", handleZoneMap)
 	mux.HandleFunc("GET /tour", handleTour)
+	mux.HandleFunc("GET /turf-tour.shortcut", handleTourShortcut)
 	mux.HandleFunc("GET /graphs", e.handleGraphs)
 	mux.HandleFunc("GET /activity", e.handleActivity)
 	mux.HandleFunc("GET /status", e.handleStatus)
@@ -1409,6 +1413,17 @@ func handleTour(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	_, _ = w.Write(tourPage)
+}
+
+// handleTourShortcut serves the companion iOS/macOS Shortcut for the tour
+// planner, so it can be imported (once — it then syncs via iCloud). It is the
+// readable plist form, so importing needs "Allow Untrusted Shortcuts"; the
+// day-to-day path is the page's "Run in Shortcuts" button.
+func handleTourShortcut(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", `attachment; filename="Turf Tour.shortcut"`)
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	_, _ = w.Write(tourShortcut)
 }
 
 // renderPage renders into a buffer first, so a template error surfaces as a 500
