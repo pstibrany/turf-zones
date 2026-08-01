@@ -166,6 +166,21 @@ function haversine(a, b) {
 }
 function coordOf(id) { const z = zonesById.get(id); return { lat: z.latitude, lng: z.longitude }; }
 
+// Owner colouring, matching the /zones ownership map: a deterministic hue per
+// owner name so the same player is the same colour on both pages.
+const NEUTRAL = "(neutral)";
+const colorCache = new Map();
+function ownerOf(z) { return z.currentOwner ? z.currentOwner.name : NEUTRAL; }
+function colorForOwner(name) {
+  if (name === NEUTRAL) return "#9aa0a6";
+  if (colorCache.has(name)) return colorCache.get(name);
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+  const c = `hsl(${h % 360} ${62 + (h >> 9) % 25}% ${42 + (h >> 4) % 12}%)`;
+  colorCache.set(name, c);
+  return c;
+}
+
 // ---------- zone loading (same tiling as the ownership map) ----------
 function gridTilesInView(b) {
   const iS = Math.floor(b.getSouth()/MAX_LAT), iN = Math.floor(b.getNorth()/MAX_LAT);
@@ -230,8 +245,10 @@ function addZoneMarker(z) {
 
 function styleMarker(id) {
   const m = markerById.get(id); if (!m) return;
+  // Selected (orange) and reached (green) override owner colour so the planned
+  // route stands out; everything else is coloured by its current owner.
   if (inTour.has(id)) m.setStyle({ fillColor: reached.has(id) ? "#34c759" : "#ff9500", radius: 7, fillOpacity: 1 });
-  else m.setStyle({ fillColor: "#8a8f98", radius: 6, fillOpacity: 0.9 });
+  else { const z = zonesById.get(id); m.setStyle({ fillColor: z ? colorForOwner(ownerOf(z)) : "#8a8f98", radius: 6, fillOpacity: 0.9 }); }
 }
 
 // ---------- tour editing ----------
