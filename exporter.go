@@ -38,7 +38,7 @@ const feedCursorKey = "feed.takeover.cursor"
 // and rendered, static/ is served verbatim — the zone map is a self-contained
 // page of HTML and JavaScript that would only be mangled by a template parser.
 //
-//go:embed templates/leaderboard.html templates/status.html templates/graphs.html
+//go:embed templates/leaderboard.html templates/status.html templates/graphs.html templates/activity.html
 var templateFS embed.FS
 
 //go:embed static/zones.html
@@ -994,8 +994,10 @@ func (e *exporter) publicMux() *http.ServeMux {
 	mux.Handle("GET /api/history", e.requireToken(http.HandlerFunc(e.handleAPIHistory)))
 	mux.HandleFunc("GET /healthz", handleHealthz)
 	mux.HandleFunc("GET /api/graph", e.handleGraphData)
+	mux.HandleFunc("GET /api/activity", e.handleActivityData)
 	mux.HandleFunc("GET /zones", handleZoneMap)
 	mux.HandleFunc("GET /graphs", e.handleGraphs)
+	mux.HandleFunc("GET /activity", e.handleActivity)
 	mux.HandleFunc("GET /status", e.handleStatus)
 	mux.HandleFunc("GET /{$}", e.handleLeaderboard)
 	return mux
@@ -1135,14 +1137,12 @@ func (e *exporter) handleLeaderboard(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-// handleGraphs renders the history charts page. It only supplies the list of
-// currently known players (for the picker) and the default selection; the
-// series themselves are fetched by the browser from /api/graph.
-func (e *exporter) handleGraphs(w http.ResponseWriter, r *http.Request) {
-	// The picker should offer everyone we have history for, not only the current
-	// top list — players drop off the top but their history remains. Seed the
-	// set from history, then fold in the current snapshot so a freshly pinned
-	// player with no stored rows yet still appears.
+// pickerPlayers returns the names offered by the player pickers on the graphs
+// and activity pages: everyone we have history for (not only the current top
+// list, since players drop off but their data remains), folded together with
+// the current snapshot so a freshly pinned player with no stored rows yet still
+// appears. The result is sorted case-insensitively.
+func (e *exporter) pickerPlayers(ctx context.Context) []string {
 	seen := map[string]bool{}
 	names := []string{}
 	add := func(n string) {
@@ -1153,8 +1153,8 @@ func (e *exporter) handleGraphs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if hist, err := e.store.historyPlayerNames(r.Context()); err != nil {
-		e.log.Warn("listing history players for graphs picker", "err", err)
+	if hist, err := e.store.historyPlayerNames(ctx); err != nil {
+		e.log.Warn("listing history players for picker", "err", err)
 	} else {
 		for _, n := range hist {
 			add(n)
@@ -1166,6 +1166,14 @@ func (e *exporter) handleGraphs(w http.ResponseWriter, r *http.Request) {
 	slices.SortFunc(names, func(a, b string) int {
 		return cmp.Compare(strings.ToLower(a), strings.ToLower(b))
 	})
+	return names
+}
+
+// handleGraphs renders the history charts page. It only supplies the list of
+// currently known players (for the picker) and the default selection; the
+// series themselves are fetched by the browser from /api/graph.
+func (e *exporter) handleGraphs(w http.ResponseWriter, r *http.Request) {
+	names := e.pickerPlayers(r.Context())
 
 	// Default to the pinned players, falling back to nothing so the page still
 	// renders before the first refresh.
@@ -1239,6 +1247,111 @@ func (e *exporter) handleGraphData(w http.ResponseWriter, r *http.Request) {
 	out := make([]graphSeries, 0, len(order))
 	for _, name := range order {
 		out = append(out, *byName[name])
+	}
+	writeJSON(w, r, e.log, out)
+}
+
+// handleActivity renders the zone-activity page: it supplies the picker names
+// and default selection, and the browser fetches the events from /api/activity.
+func (e *exporter) handleActivity(w http.ResponseWriter, r *http.Request) {
+	e.renderPage(w, "activity.html", map[string]any{
+		"Title":    "Activity",
+		"Area":     e.sel.summary,
+		"Players":  e.pickerPlayers(r.Context()),
+		"Defaults": strings.Join(e.cfg.Players, ","),
+	})
+}
+
+// activityEvent is one zone change from a single player's perspective: they
+// either gained the zone (they were the taker) or lost it (they were the
+// previous owner). Opponent is the other party in the takeover.
+type activityEvent struct {
+	Time     time.Time `json:"time"`
+	Player   string    `json:"player"`
+	Action   string    `json:"action"` // "gained" or "lost"
+	Zone     string    `json:"zone"`
+	ZoneID   int64     `json:"zone_id"`
+	Opponent string    `json:"opponent"`
+	Points   int64     `json:"points"`
+	Lat      float64   `json:"lat"`
+	Lng      float64   `json:"lng"`
+}
+
+// handleActivityData serves recent zone gains and losses for the selected
+// players as a flat JSON array, newest first. Public, like /api/graph: it
+// exposes only takeovers already logged for the monitored area.
+func (e *exporter) handleActivityData(w http.ResponseWriter, r *http.Request) {
+	now := time.Now()
+	days := 7
+	if v := r.URL.Query().Get("days"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			httpError(w, http.StatusBadRequest, "days must be a positive integer")
+			return
+		}
+		days = min(n, 90)
+	}
+	// The area's whole feed is only ~1750 rows/week, so even a month with many
+	// players selected is a few thousand events. Default high enough that the
+	// summary and heatmap see every event in the window rather than a truncated
+	// tail; the cap is only a sanity bound.
+	limit := 50000
+	if v := r.URL.Query().Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			httpError(w, http.StatusBadRequest, "limit must be a positive integer")
+			return
+		}
+		limit = min(n, 100000)
+	}
+
+	names := splitParams(r.URL.Query()["player"])
+	if len(names) == 0 {
+		writeJSON(w, r, e.log, []activityEvent{})
+		return
+	}
+
+	// A set for O(1) membership tests, keyed by lower-case name to match the
+	// case-insensitive query.
+	want := map[string]bool{}
+	for _, n := range names {
+		want[strings.ToLower(n)] = true
+	}
+
+	rows, err := e.store.takeoversForPlayers(r.Context(), names, now.AddDate(0, 0, -days), now, limit)
+	if err != nil {
+		e.log.Error("activity query failed", "err", err)
+		httpError(w, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	// One takeover can produce two events when both parties are selected (a
+	// player took a zone from another player who is also in the picker). A
+	// revisit — the owner re-taking their own zone to refresh it — has taker and
+	// previous owner equal; it is neither a gain nor a loss, so it becomes a
+	// single "revisit" event with no opponent. (Assists are documented but
+	// absent from the feed in practice, so there is nothing to surface for them.)
+	out := []activityEvent{}
+	for _, t := range rows {
+		revisit := t.PreviousOwnerID != 0 && t.TakerID == t.PreviousOwnerID
+		if want[strings.ToLower(t.TakerName)] {
+			action, opponent := "gained", t.PreviousOwnerName
+			if revisit {
+				action, opponent = "revisit", ""
+			}
+			out = append(out, activityEvent{
+				Time: t.Time, Player: t.TakerName, Action: action,
+				Zone: t.ZoneName, ZoneID: t.ZoneID, Opponent: opponent,
+				Points: t.TakeoverPoints, Lat: t.Latitude, Lng: t.Longitude,
+			})
+		}
+		if !revisit && t.PreviousOwnerName != "" && want[strings.ToLower(t.PreviousOwnerName)] {
+			out = append(out, activityEvent{
+				Time: t.Time, Player: t.PreviousOwnerName, Action: "lost",
+				Zone: t.ZoneName, ZoneID: t.ZoneID, Opponent: t.TakerName,
+				Points: t.TakeoverPoints, Lat: t.Latitude, Lng: t.Longitude,
+			})
+		}
 	}
 	writeJSON(w, r, e.log, out)
 }

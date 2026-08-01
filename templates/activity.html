@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="light dark" />
+<title>Turf — Activity</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f6f8; --card: #ffffff; --ink: #16181d;
+    --muted: #6b7280; --line: rgba(0,0,0,0.08); --accent: #007aff;
+    --gain: #1e874b; --gain-bg: rgba(52, 199, 89, 0.14);
+    --loss: #c0392b; --loss-bg: rgba(255, 59, 48, 0.13);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #131418; --card: #1c1e24; --ink: #e8e9ec;
+      --muted: #9aa0aa; --line: rgba(255,255,255,0.10); --accent: #4da3ff;
+      --gain: #4ade80; --gain-bg: rgba(52, 199, 89, 0.16);
+      --loss: #ff6b60; --loss-bg: rgba(255, 59, 48, 0.16);
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: max(12px, env(safe-area-inset-top)) 12px calc(24px + env(safe-area-inset-bottom));
+  }
+  main { max-width: 720px; margin: 0 auto; }
+  header { padding: 4px 4px 12px; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+
+  nav { margin: 0 0 14px; padding: 0 4px; font-size: 13px; display: flex; gap: 16px; }
+  nav a { color: var(--accent); text-decoration: none; }
+  nav a:hover { text-decoration: underline; }
+
+  .card {
+    background: var(--card); border-radius: 14px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.06), 0 4px 16px rgba(0,0,0,0.05);
+    margin-bottom: 12px; padding: 14px;
+  }
+  .card h2 {
+    margin: 0 0 10px; font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted);
+  }
+
+  .picker { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .picker input[type=text] {
+    flex: 1; min-width: 180px; font: inherit; color: var(--ink);
+    background: var(--bg); border: 1px solid var(--line); border-radius: 10px;
+    padding: 8px 10px;
+  }
+  .picker select, .picker button {
+    font: inherit; color: var(--ink); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px;
+    cursor: pointer;
+  }
+  .picker button { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 550; }
+  .picker button:active { transform: translateY(1px); }
+
+  .summary { display: flex; flex-wrap: wrap; gap: 8px 14px; margin-bottom: 10px; font-size: 12.5px; }
+  .summary span { color: var(--muted); }
+  .summary b { color: var(--ink); font-variant-numeric: tabular-nums; }
+  .up { color: var(--gain); }
+  .down { color: var(--loss); }
+
+  .card.list { padding: 0; overflow: hidden; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  thead th {
+    position: sticky; top: 0; background: var(--card); z-index: 1;
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--muted); font-weight: 600; text-align: left;
+    padding: 10px 8px 8px; border-bottom: 1px solid var(--line);
+  }
+  td { padding: 9px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  tr:last-child td { border-bottom: 0; }
+  td.time { color: var(--muted); font-size: 12.5px; }
+  td.player { font-weight: 550; }
+  td.zone {
+    width: 99%; max-width: 0; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  td.zone a { color: inherit; text-decoration: none; }
+  td.zone a:hover { color: var(--accent); text-decoration: underline; }
+  td.pts { text-align: right; color: var(--muted); padding-right: 12px; }
+  .tag {
+    display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 7px;
+    border-radius: 999px;
+  }
+  .tag.gained { color: var(--gain); background: var(--gain-bg); }
+  .tag.lost { color: var(--loss); background: var(--loss-bg); }
+  .tag.revisit { color: var(--muted); background: var(--line); }
+  .opp { color: var(--muted); }
+  .opp a { color: inherit; text-decoration: none; }
+  .opp a:hover { color: var(--accent); text-decoration: underline; }
+
+  .empty { padding: 22px 14px; color: var(--muted); text-align: center; font-size: 13.5px; }
+
+  .pager {
+    display: flex; align-items: center; justify-content: center; gap: 14px;
+    padding: 12px; border-top: 1px solid var(--line);
+  }
+  .pager .count { color: var(--muted); font-size: 12.5px; }
+  .pager button {
+    font: inherit; font-size: 13px; font-weight: 550; color: var(--accent);
+    background: var(--bg); border: 1px solid var(--line); border-radius: 10px;
+    padding: 7px 14px; cursor: pointer;
+  }
+  .pager button:active { transform: translateY(1px); }
+
+  /* Weekday x hour-of-day activity heatmap. One per selected player. */
+  .hm { margin-bottom: 10px; }
+  .hm h2 { display: flex; align-items: baseline; justify-content: space-between; }
+  .hm h2 .peak { font-weight: 400; text-transform: none; letter-spacing: 0; }
+  .hm-grid {
+    display: grid; grid-template-columns: 2.2em repeat(24, 1fr);
+    gap: 2px; align-items: center;
+  }
+  .hm-grid .lbl { color: var(--muted); font-size: 10px; }
+  .hm-grid .hlbl { color: var(--muted); font-size: 9px; text-align: left; height: 12px; }
+  .hm-grid .cell {
+    aspect-ratio: 1 / 1; border-radius: 2px; background: var(--line);
+  }
+  .hm-grid .cell.hot { background: var(--accent); }
+  .hm-note { color: var(--muted); font-size: 11px; margin-top: 8px; }
+
+  @media (max-width: 480px) {
+    td.pts, thead th.pts { display: none; }
+    .hm-grid { gap: 1px; grid-template-columns: 1.8em repeat(24, 1fr); }
+  }
+  @media (max-width: 400px) {
+    body { font-size: 14px; }
+    td, thead th { padding-left: 6px; padding-right: 6px; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <nav>
+    <a href="/">Leaderboard</a>
+    <a href="/zones">Zone map</a>
+    <a href="/graphs">History</a>
+    <a href="/activity">Activity</a>
+    <a href="/status">Status</a>
+  </nav>
+
+  <header>
+    <h1>Zone activity</h1>
+    <div class="sub" id="sub">Zones gained and lost · {{ .Area }}</div>
+  </header>
+
+  <div class="card">
+    <h2>Players</h2>
+    <div class="picker">
+      <input type="text" id="names" list="known" placeholder="Enter player names, comma-separated"
+             autocapitalize="off" autocorrect="off" spellcheck="false" />
+      <datalist id="known">
+        {{ range .Players }}<option value="{{ . }}"></option>{{ end }}
+      </datalist>
+      <select id="add">
+        <option value="">Add from list…</option>
+        {{ range .Players }}<option value="{{ . }}">{{ . }}</option>{{ end }}
+      </select>
+      <select id="range" title="Time window">
+        <option value="7">7 days</option>
+        <option value="14">14 days</option>
+        <option value="30">30 days</option>
+      </select>
+      <button id="show">Show</button>
+    </div>
+  </div>
+
+  <div class="summary" id="summary"></div>
+  <div id="heatmaps"></div>
+  <div class="card list" id="events"></div>
+</main>
+
+<script>
+const PAGE_SIZE = 50;   // rows revealed per "Show more"
+let EVENTS = [];        // full result set for the current selection
+let shown = 0;          // how many rows are currently rendered
+
+const namesInput = document.getElementById("names");
+const addSelect = document.getElementById("add");
+const showBtn = document.getElementById("show");
+const rangeSelect = document.getElementById("range");
+
+rangeSelect.addEventListener("change", load);
+
+addSelect.addEventListener("change", () => {
+  const v = addSelect.value;
+  addSelect.value = "";
+  if (!v) return;
+  const cur = parseNames(namesInput.value);
+  if (!cur.some((n) => n.toLowerCase() === v.toLowerCase())) {
+    cur.push(v);
+    namesInput.value = cur.join(", ");
+  }
+  load();
+});
+showBtn.addEventListener("click", load);
+namesInput.addEventListener("keydown", (e) => { if (e.key === "Enter") load(); });
+
+function parseNames(s) {
+  return s.split(",").map((x) => x.trim()).filter((x) => x.length > 0);
+}
+
+function syncURL(names, days) {
+  const u = new URL(window.location);
+  if (names.length) u.searchParams.set("players", names.join(","));
+  else u.searchParams.delete("players");
+  u.searchParams.set("days", days);
+  history.replaceState(null, "", u);
+}
+
+async function load() {
+  const names = parseNames(namesInput.value);
+  const days = rangeSelect.value;
+  syncURL(names, days);
+  document.getElementById("sub").textContent =
+    "Zones gained and lost over the last " + days + " days · {{ .Area }}";
+  if (!names.length) {
+    document.getElementById("summary").innerHTML = "";
+    renderEmpty("Enter one or more player names above.");
+    return;
+  }
+  const q = names.map((n) => "player=" + encodeURIComponent(n)).join("&");
+  let data = [];
+  try {
+    const resp = await fetch("/api/activity?days=" + encodeURIComponent(days) + "&" + q);
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    data = await resp.json();
+  } catch (err) {
+    document.getElementById("summary").innerHTML = "";
+    renderEmpty("Failed to load: " + err.message);
+    return;
+  }
+  render(data);
+}
+
+function renderEmpty(msg) {
+  document.getElementById("heatmaps").innerHTML = "";
+  document.getElementById("events").innerHTML = '<div class="empty">' + msg + "</div>";
+}
+
+const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+// drawHeatmaps renders, per player, a weekday x hour-of-day grid where each
+// cell's darkness is how many zones that player *took* in that slot, in the
+// viewer's local time. Only the player's own actions (gains and revisits) count
+// — a lost zone marks when someone else was active, not this player, so it is
+// excluded here even though it still appears in the list and summary.
+function drawHeatmaps(events) {
+  const byPlayer = {};
+  for (const e of events) {
+    if (e.action === "lost") continue;
+    const g = (byPlayer[e.player] = byPlayer[e.player] || Array.from({ length: 7 }, () => new Array(24).fill(0)));
+    const d = new Date(e.time);
+    g[(d.getDay() + 6) % 7][d.getHours()]++; // Monday-first weekday index
+  }
+
+  const players = Object.keys(byPlayer).sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+  const blocks = players.map((p) => {
+    const grid = byPlayer[p];
+    let max = 0, peakVal = 0, peakDay = 0, peakHour = 0;
+    for (let d = 0; d < 7; d++) {
+      for (let h = 0; h < 24; h++) {
+        const v = grid[d][h];
+        if (v > max) max = v;
+        if (v > peakVal) { peakVal = v; peakDay = d; peakHour = h; }
+      }
+    }
+
+    // Hour header: label every 6 hours, blanks elsewhere.
+    let cells = '<div class="hlbl"></div>';
+    for (let h = 0; h < 24; h++) {
+      cells += '<div class="hlbl">' + (h % 6 === 0 ? h : "") + "</div>";
+    }
+    for (let d = 0; d < 7; d++) {
+      cells += '<div class="lbl">' + DAYS[d] + "</div>";
+      for (let h = 0; h < 24; h++) {
+        const v = grid[d][h];
+        if (v === 0) {
+          cells += '<div class="cell" title="' + DAYS[d] + " " + pad2(h) + ':00 · 0"></div>';
+        } else {
+          // Scale opacity 0.25..1 so even a single event is clearly visible.
+          const op = (0.25 + 0.75 * (v / max)).toFixed(2);
+          cells += '<div class="cell hot" style="opacity:' + op + '" title="' +
+            DAYS[d] + " " + pad2(h) + ":00 · " + v + (v === 1 ? " event" : " events") + '"></div>';
+        }
+      }
+    }
+
+    const peak = peakVal ? "busiest " + DAYS[peakDay] + " " + pad2(peakHour) + ":00" : "";
+    return '<div class="card hm"><h2>' + escapeHTML(p) +
+      '<span class="peak">' + peak + "</span></h2>" +
+      '<div class="hm-grid">' + cells + "</div></div>";
+  });
+
+  document.getElementById("heatmaps").innerHTML = blocks.join("") +
+    '<p class="hm-note">Darker = more zones taken (gains &amp; revisits) · your local time · weekday × hour</p>';
+}
+
+function pad2(n) { return n < 10 ? "0" + n : "" + n; }
+
+function render(events) {
+  const summaryEl = document.getElementById("summary");
+  if (!events.length) {
+    summaryEl.innerHTML = "";
+    renderEmpty("No zone activity for the selected players in this area over the last " + rangeSelect.value + " days.");
+    return;
+  }
+
+  // Per-player tally of gains, losses and revisits for the summary line. This
+  // always reflects the full result set, not just the rows currently shown.
+  const tally = {};
+  for (const e of events) {
+    const t = (tally[e.player] = tally[e.player] || { gained: 0, lost: 0, revisit: 0 });
+    t[e.action]++;
+  }
+  summaryEl.innerHTML = Object.keys(tally).sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()))
+    .map((p) => {
+      const t = tally[p];
+      let s = '<span>' + escapeHTML(p) + ' <b class="up">+' + t.gained +
+        '</b> / <b class="down">\u2212' + t.lost + "</b>";
+      if (t.revisit) s += ' <b>\u21bb' + t.revisit + "</b>";
+      return s + "</span>";
+    }).join("");
+
+  drawHeatmaps(events);
+
+  EVENTS = events;
+  shown = Math.min(PAGE_SIZE, events.length);
+  paint();
+}
+
+// paint renders the first `shown` events plus the pager. Called on first render
+// and whenever "Show more" reveals another page.
+function paint() {
+  const rows = EVENTS.slice(0, shown).map((e) => {
+    const gained = e.action === "gained";
+    const label = e.action === "revisit" ? "revisit" : (gained ? "gained" : "lost");
+    const tag = '<span class="tag ' + e.action + '">' + label + "</span>";
+    const opp = e.opponent
+      ? '<span class="opp">' + (gained ? "from " : "to ") +
+        '<a href="https://turfgame.com/user/' + encodeURIComponent(e.opponent) +
+        '" rel="noreferrer">' + escapeHTML(e.opponent) + "</a></span>"
+      : "";
+    return "<tr>" +
+      '<td class="time">' + fmtTime(e.time) + "</td>" +
+      '<td class="player"><a href="https://turfgame.com/user/' + encodeURIComponent(e.player) +
+        '" rel="noreferrer" style="color:inherit;text-decoration:none">' + escapeHTML(e.player) + "</a></td>" +
+      "<td>" + tag + "</td>" +
+      '<td class="zone"><a href="https://turfgame.com/zone/' + encodeURIComponent(e.zone) +
+        '" rel="noreferrer">' + escapeHTML(e.zone) + "</a> " + opp + "</td>" +
+      '<td class="pts">' + (e.points ? "+" + e.points : "") + "</td>" +
+      "</tr>";
+  }).join("");
+
+  let pager = '<div class="pager"><span class="count">Showing ' + shown +
+    " of " + EVENTS.length + "</span>";
+  if (shown < EVENTS.length) {
+    const next = Math.min(PAGE_SIZE, EVENTS.length - shown);
+    pager += '<button id="more">Show ' + next + " more</button>";
+  }
+  pager += "</div>";
+
+  document.getElementById("events").innerHTML =
+    "<table><thead><tr><th>When</th><th>Player</th><th>Action</th><th>Zone</th>" +
+    '<th class="pts">Pts</th></tr></thead><tbody>' + rows + "</tbody></table>" + pager;
+
+  const more = document.getElementById("more");
+  if (more) more.addEventListener("click", () => { shown = Math.min(shown + PAGE_SIZE, EVENTS.length); paint(); });
+}
+
+function fmtTime(iso) {
+  const d = new Date(iso);
+  const now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  const time = d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  if (sameDay) return time;
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) + " " + time;
+}
+
+function escapeHTML(s) {
+  return String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// Initial selection: ?players= and ?days= in the URL, else the defaults.
+(function init() {
+  const params = new URL(window.location).searchParams;
+  const fromURL = params.get("players");
+  namesInput.value = fromURL !== null ? fromURL : {{ .Defaults }};
+  const days = params.get("days");
+  if (days && [...rangeSelect.options].some((o) => o.value === days)) rangeSelect.value = days;
+  load();
+})();
+</script>
+</body>
+</html>

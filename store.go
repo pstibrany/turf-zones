@@ -329,6 +329,59 @@ func (s *store) takeoverCounts(ctx context.Context, since time.Time) (map[int64]
 	return out, rows.Err()
 }
 
+// takeoversForPlayers returns takeovers within [from, to] in which any of the
+// named players was either the taker or the previous owner, newest first. It is
+// the raw material for the activity page: the caller decides, per row, whether
+// it counts as a zone gained or lost for a given player.
+//
+// Matching is by name (case-insensitive) to mirror the graphs picker, which
+// deals in names rather than ids.
+func (s *store) takeoversForPlayers(ctx context.Context, names []string, from, to time.Time, limit int) ([]takeover, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	ph := placeholders(len(names))
+	sb := strings.Builder{}
+	sb.WriteString(`
+		SELECT time, zone_id, zone_name, latitude, longitude,
+		       taker_id, taker_name, previous_owner_id, previous_owner_name,
+		       takeover_points, points_per_hour
+		FROM takeovers
+		WHERE time >= ? AND time <= ?
+		  AND (taker_name COLLATE NOCASE IN (` + ph + `)
+		       OR previous_owner_name COLLATE NOCASE IN (` + ph + `))
+		ORDER BY time DESC LIMIT ?`)
+
+	args := []any{from.Unix(), to.Unix()}
+	for _, n := range names {
+		args = append(args, n)
+	}
+	for _, n := range names {
+		args = append(args, n)
+	}
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("takeovers for players: %w", err)
+	}
+	defer rows.Close()
+
+	out := []takeover{}
+	for rows.Next() {
+		var t takeover
+		var ts int64
+		if err := rows.Scan(&ts, &t.ZoneID, &t.ZoneName, &t.Latitude, &t.Longitude,
+			&t.TakerID, &t.TakerName, &t.PreviousOwnerID, &t.PreviousOwnerName,
+			&t.TakeoverPoints, &t.PointsPerHour); err != nil {
+			return nil, err
+		}
+		t.Time = time.Unix(ts, 0).UTC()
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 // countPlayers returns how many distinct players the cached leaderboards hold.
 func (s *store) countPlayers(ctx context.Context) (int64, error) {
 	var n int64
