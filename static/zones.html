@@ -212,6 +212,9 @@ function popupHtml(z) {
       <span class="k">Takeover points</span><span class="v">${z.takeoverPoints ?? "—"}</span>
       ${region ? `<span class="k">Region</span><span class="v">${esc(region)}</span>` : ""}
     </div>
+    <div style="margin-top:6px">Navigate in Apple Maps:
+      <a href="https://maps.apple.com/?daddr=${z.latitude},${z.longitude}&dirflg=w" target="_blank">Walk</a> ·
+      <a href="https://maps.apple.com/?daddr=${z.latitude},${z.longitude}&dirflg=c" target="_blank">Bike</a></div>
     <div style="margin-top:6px"><a href="https://turfgame.com/zone/${encodeURIComponent(z.name)}" target="_blank">Open on turfgame.com ↗</a></div>`;
 }
 
