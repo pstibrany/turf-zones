@@ -349,7 +349,7 @@ function refresh() {
       `<span class="num">${done ? "✓" : idx+1}</span>` +
       `<div class="body"><div class="name">${esc(z.name)}</div>` +
       `<div class="meta">${done ? "reached" : (leg != null ? fmtDist(leg) + " from previous" : "start point")}</div></div>` +
-      `<a class="maps" title="Directions in Apple Maps (walking)" target="_blank" href="https://maps.apple.com/?daddr=${z.latitude},${z.longitude}&dirflg=w">🗺️</a>` +
+      `<a class="maps" title="Directions in Apple Maps" target="_blank" href="https://maps.apple.com/?daddr=${z.latitude},${z.longitude}&dirflg=${appleDirflg()}">🗺️</a>` +
       `<button class="rm" title="Remove">✕</button>`;
     row.querySelector(".rm").onclick = () => removeZone(id);
     row.querySelector(".name").onclick = () => map.panTo([z.latitude, z.longitude]);
@@ -361,6 +361,9 @@ function refresh() {
 }
 
 // ---------- Google Maps full-route link ----------
+// Apple Maps direction flag for the selected travel mode: w=walk, c=cycle.
+function appleDirflg() { return document.getElementById("mode").value === "bicycling" ? "c" : "w"; }
+
 function openGoogle() {
   const remainingIds = tour.filter(id => !reached.has(id));
   if (!remainingIds.length) return;
@@ -418,7 +421,7 @@ document.getElementById("clear").onclick = clearTour;
 document.getElementById("gmaps").onclick = openGoogle;
 document.getElementById("live").onclick = toggleLive;
 document.getElementById("fromme").onchange = refresh;
-document.getElementById("mode").onchange = () => {};
+document.getElementById("mode").onchange = refresh; // re-render per-stop Apple links for the new mode
 document.getElementById("toggle").onclick = () => document.querySelector(".panel").classList.toggle("hidden");
 
 let moveTimer = null;
