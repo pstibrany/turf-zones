@@ -62,6 +62,10 @@
   .pop-grid { display: grid; grid-template-columns: auto auto; gap: 1px 10px; margin-top: 6px; }
   .pop-grid .k { opacity: 0.6; }
   .pop-grid .v { text-align: right; font-variant-numeric: tabular-nums; }
+  .meicon {
+    width: 16px; height: 16px; border-radius: 50%; background: #1e90ff;
+    border: 3px solid #fff; box-shadow: 0 0 0 2px rgba(30,144,255,0.5), 0 1px 6px rgba(0,0,0,0.5);
+  }
 </style>
 </head>
 <body>
@@ -223,9 +227,15 @@ function render() {
   markers = [];
   for (const z of zonesById.values()) {
     const owner = ownerOf(z), color = colorForOwner(owner);
-    const m = L.circleMarker([z.latitude, z.longitude], { radius: 6, weight: 1.5, color: "#fff", fillColor: color, fillOpacity: 0.9 });
-    m.bindPopup(() => popupHtml(z), { maxWidth: 260 });
-    m.bindTooltip(`${z.name} — ${owner}`, { direction: "top" });
+    const ll = [z.latitude, z.longitude];
+    // Large invisible circle is the tap target (finger-friendly) and carries the
+    // popup + tooltip; the visible dot stays small and non-interactive so taps
+    // fall through to it.
+    const hit = L.circleMarker(ll, { radius: 16, stroke: false, fill: true, fillOpacity: 0 });
+    hit.bindPopup(() => popupHtml(z), { maxWidth: 260 });
+    hit.bindTooltip(`${z.name} — ${owner}`, { direction: "top" });
+    hit.addTo(zoneLayer);
+    const m = L.circleMarker(ll, { radius: 6, weight: 1.5, color: "#fff", fillColor: color, fillOpacity: 0.9, interactive: false });
     m.addTo(zoneLayer);
     markers.push({ marker: m, owner });
   }
@@ -285,13 +295,27 @@ map.on("moveend", scheduleLoad);
 map.on("zoomend", scheduleLoad);
 
 // ---- startup ------------------------------------------------------------
-// Start at the user's location if allowed; otherwise stay on Copenhagen.
-// Either way the resulting moveend (or the fallback below) triggers a load.
+// Show and follow the user's position with a blue dot; centre on the first fix.
+// Either the first fix (via setView → moveend) or the error fallback triggers a
+// zone load. watchPosition keeps the dot current as you move.
+let myMarker = null, centeredOnce = false;
+function onPosition(p) {
+  const ll = [p.coords.latitude, p.coords.longitude];
+  if (!myMarker) {
+    myMarker = L.marker(ll, {
+      icon: L.divIcon({ className: "", html: '<div class="meicon"></div>', iconSize: [16, 16], iconAnchor: [8, 8] }),
+      zIndexOffset: 1000, interactive: false,
+    }).addTo(map);
+  } else {
+    myMarker.setLatLng(ll);
+  }
+  if (!centeredOnce) { centeredOnce = true; map.setView(ll, 14); }
+}
 if (navigator.geolocation) {
-  navigator.geolocation.getCurrentPosition(
-    p => map.setView([p.coords.latitude, p.coords.longitude], 14),
-    () => loadZones(),
-    { enableHighAccuracy: true, timeout: 10000 }
+  navigator.geolocation.watchPosition(
+    onPosition,
+    () => { if (!centeredOnce) loadZones(); },
+    { enableHighAccuracy: true, timeout: 10000, maximumAge: 5000 }
   );
 } else {
   loadZones();
