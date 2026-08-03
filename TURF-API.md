@@ -30,8 +30,7 @@ What we learned probing the live [Turf](https://turfgame.com/) API. Findings are
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/zones` | POST | Zones inside a bounding box, or by name/id |
-| `/zones/<name\|id>` | GET | One zone, richer detail |
+| `/zones` | POST | Zones inside a bounding box, **or by name/id** (see below) |
 | `/zones/all` | GET | **Every zone in the game**, one request, ≤1 per 30 min |
 | `/users` | POST | Player stats (batch, by name / id / email) |
 | **`/users/top`** | **GET, POST** | **Leaderboard — global, or per region/country** |
@@ -72,7 +71,7 @@ country tab filters on country and excludes both.
   page as unreliable for ranking.
 - A region can be shorter than 50: Hovedstaden had 38 players.
 
-### POST /zones — bounding box
+### POST /zones — bounding box, or by name/id
 
 Body is an **array** of box objects:
 
@@ -80,6 +79,21 @@ Body is an **array** of box objects:
 [{"northEast":{"latitude":55.75,"longitude":12.65},
   "southWest":{"latitude":55.60,"longitude":12.45}}]
 ```
+
+**Fetch a single zone** with the same endpoint, passing name and/or id objects
+(returns a one-element array):
+
+```bash
+curl -s -X POST https://api.turfgame.com/v5/zones \
+  -H 'Content-Type: application/json' -d '[{"name":"Skeltoftevej"}]'
+# or -d '[{"id":34437}]'
+```
+
+⚠️ There is **no** `GET /zones/<name|id>` — that path 404s (verified for both a
+name and a numeric id). Name/id lookup is POST-only, like the box query, and
+returns the **same zone object** (no extra "detail", and in particular no
+geometry: a zone is only a center `latitude`/`longitude`, never a shape or
+radius, even though the game app may draw some zones as polygons).
 
 - Returns every zone in the rectangle (central Copenhagen ≈ 950 zones).
 - ⚠️ **Multiple boxes in one array is unreliable** — only the first box is
