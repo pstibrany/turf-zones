@@ -43,9 +43,10 @@
   button:disabled { opacity: 0.5; cursor: default; }
   input { flex: 1; }
   .status { padding: 0 14px 8px; font-size: 11px; opacity: 0.75; min-height: 14px; }
-  .filterbar { padding: 4px 14px 8px; display: flex; gap: 6px; align-items: center; border-top: 1px solid rgba(128,128,128,0.2); }
-  .filterbar input { padding: 5px 8px; }
-  .filterbar button { flex: 0 0 auto; padding: 5px 8px; }
+  .filterbar { padding: 4px 14px 8px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; border-top: 1px solid rgba(128,128,128,0.2); }
+  .filterbar input { padding: 5px 8px; flex: 1 1 120px; min-width: 0; }
+  .filterbar button { flex: 0 0 auto; padding: 5px 10px; }
+  .filterbar button.on { background: #007aff; color: #fff; border-color: #007aff; }
   .legend { overflow-y: auto; padding: 0 6px 8px; }
   .legend-title { padding: 6px 8px 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; opacity: 0.55; }
   .owner {
@@ -80,6 +81,9 @@
   <div class="status" id="status">Locating…</div>
   <div class="filterbar">
     <input id="search" type="search" placeholder="Filter owners…" />
+    <button id="follow" title="Follow my location (keeps GPS on)">📍</button>
+    <button id="players" title="Show active players (refreshes ≤ once/min)">🏃</button>
+    <button id="valuemode" title="Size zones by value (points/hour)">💎</button>
   </div>
   <div class="legend">
     <div class="legend-title" id="legend-title">Owners in view — tick to show only those</div>
@@ -106,11 +110,13 @@ L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r
 }).addTo(map);
 
 const zoneLayer = L.layerGroup().addTo(map);
-let markers = [];                 // { marker, owner }
+const playerLayer = L.layerGroup().addTo(map);
+let markers = [];                 // { marker, owner, pph }
 const zonesById = new Map();      // accumulates across loads; deduped by zone id
 const coveredTiles = new Set();   // grid-tile keys already fetched — skipped on reload
 const selected = new Set();       // owners ticked to show; empty = show all
 let loadToken = 0;                // incrementing cancels an in-flight load
+let valueMode = false;            // when on, dot size scales with points-per-hour
 
 // ---- deterministic color per owner --------------------------------------
 const colorCache = new Map();
@@ -219,8 +225,31 @@ function popupHtml(z) {
     <div style="margin-top:6px">Navigate in Apple Maps:
       <a href="https://maps.apple.com/?daddr=${z.latitude},${z.longitude}&dirflg=w" target="_blank">Walk</a> ·
       <a href="https://maps.apple.com/?daddr=${z.latitude},${z.longitude}&dirflg=c" target="_blank">Bike</a></div>
-    <div style="margin-top:6px"><a href="https://turfgame.com/zone/${encodeURIComponent(z.name)}" target="_blank">Open on turfgame.com ↗</a></div>`;
+    <div class="zone-act" data-zone-id="${z.id}" style="margin-top:8px; padding-top:6px; border-top:1px solid rgba(128,128,128,0.25);">
+      <div style="opacity:0.6">Recent takeovers…</div></div>
+    <div style="margin-top:6px">
+      <a href="/zone?zone_id=${z.id}&zone=${encodeURIComponent(z.name)}" target="_blank">Zone activity ↗</a> ·
+      <a href="https://turfgame.com/zone/${encodeURIComponent(z.name)}" target="_blank">turfgame.com ↗</a></div>`;
 }
+
+// When a zone popup opens, fill its "recent takeovers" section from our own
+// backend (only the monitored area has data). Cached per popup via data-loaded.
+map.on("popupopen", async (e) => {
+  const el = e.popup.getElement().querySelector(".zone-act");
+  if (!el || el.dataset.loaded) return;
+  el.dataset.loaded = "1";
+  const id = el.dataset.zoneId;
+  try {
+    const res = await fetch("/api/zone-activity?zone_id=" + encodeURIComponent(id) + "&limit=5");
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const rows = await res.json();
+    if (!rows.length) { el.innerHTML = '<div style="opacity:0.6">No recorded takeovers (this area only).</div>'; return; }
+    el.innerHTML = '<div style="opacity:0.6; margin-bottom:2px">Recent takeovers</div>' +
+      rows.map(r => `<div>${ago(r.time)} — <b>${esc(r.taker)}</b>${r.previous_owner ? " ← " + esc(r.previous_owner) : ""}</div>`).join("");
+  } catch (err) {
+    el.innerHTML = '<div style="opacity:0.6">Activity unavailable.</div>';
+  }
+});
 
 function render() {
   zoneLayer.clearLayers();
@@ -232,12 +261,12 @@ function render() {
     // popup + tooltip; the visible dot stays small and non-interactive so taps
     // fall through to it.
     const hit = L.circleMarker(ll, { radius: 16, stroke: false, fill: true, fillOpacity: 0 });
-    hit.bindPopup(() => popupHtml(z), { maxWidth: 260 });
+    hit.bindPopup(() => popupHtml(z), { maxWidth: 340, minWidth: 220 });
     hit.bindTooltip(`${z.name} — ${owner}`, { direction: "top" });
     hit.addTo(zoneLayer);
     const m = L.circleMarker(ll, { radius: 6, weight: 1.5, color: "#fff", fillColor: color, fillOpacity: 0.9, interactive: false });
     m.addTo(zoneLayer);
-    markers.push({ marker: m, owner });
+    markers.push({ marker: m, owner, pph: z.pointsPerHour || 1 });
   }
   buildLegend();
   applyFilter();
@@ -272,11 +301,22 @@ function updateTitle() {
     selected.size ? `Showing ${selected.size} selected owner(s) — untick to show all` : "Owners in view — tick to show only those";
 }
 
+// baseRadius is the dot size for a zone. In value mode it grows with
+// points-per-hour from the normal 6px baseline (PPH 1 = 6px … PPH 9 = 30px, at
+// 3px per point) so more valuable zones are clearly bigger while keeping their
+// owner colour; otherwise every dot is a uniform 6px.
+function baseRadius(pph) {
+  if (!valueMode) return 6;
+  const v = Math.min(Math.max(pph || 1, 1), 9);
+  return 6 + (v - 1) * 3;
+}
+
 function applyFilter() {
   const active = selected.size > 0;
-  for (const { marker, owner } of markers) {
+  for (const { marker, owner, pph } of markers) {
     const on = !active || selected.has(owner);
-    marker.setStyle({ fillOpacity: on ? 0.95 : 0.06, opacity: on ? 1 : 0.08, radius: !active ? 6 : (on ? 8 : 3) });
+    const r = baseRadius(pph);
+    marker.setStyle({ fillOpacity: on ? 0.95 : 0.06, opacity: on ? 1 : 0.08, radius: !active ? r : (on ? r + 2 : 3) });
     if (on && active) marker.bringToFront();
   }
 }
@@ -284,6 +324,17 @@ function applyFilter() {
 // ---- events -------------------------------------------------------------
 document.getElementById("search").addEventListener("input", buildLegend);
 document.getElementById("toggle").onclick = () => document.querySelector(".panel").classList.toggle("hidden");
+
+// Toggle value mode: dot size ~ points-per-hour, owner colour unchanged.
+document.getElementById("valuemode").onclick = () => {
+  const b = document.getElementById("valuemode");
+  valueMode = !valueMode;
+  b.classList.toggle("on", valueMode);
+  applyFilter();
+  setStatus(valueMode
+    ? "Sizing zones by value — bigger dot = more points/hour (1–9)."
+    : "Value sizing off.");
+};
 
 // Auto-load new tiles whenever the map settles after a pan/zoom.
 let moveTimer = null;
@@ -294,11 +345,79 @@ function scheduleLoad() {
 map.on("moveend", scheduleLoad);
 map.on("zoomend", scheduleLoad);
 
-// ---- startup ------------------------------------------------------------
-// Show and follow the user's position with a blue dot; centre on the first fix.
-// Either the first fix (via setView → moveend) or the error fallback triggers a
-// zone load. watchPosition keeps the dot current as you move.
-let myMarker = null, centeredOnce = false;
+// ---- active players overlay --------------------------------------------
+// GET /users/location returns every player currently visible on the game map,
+// worldwide. It is global and rate-limited, so this is opt-in: while on, we call
+// at most once per 60 s and just re-filter the cached list to the current view
+// on pan/zoom. Players show as distinct runner markers, separate from zones.
+// Turf's "enemy player" icon (from the game wiki), resized to 64x64 and inlined
+// as a data URI, displayed at 32x32 (crisp on retina screens).
+const PLAYER_ICON = L.icon({ iconUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAAXNSR0IArs4c6QAAAHhlWElmTU0AKgAAAAgABAEaAAUAAAABAAAAPgEbAAUAAAABAAAARgEoAAMAAAABAAIAAIdpAAQAAAABAAAATgAAAAAAAABIAAAAAQAAAEgAAAABAAOgAQADAAAAAQABAACgAgAEAAAAAQAAAECgAwAEAAAAAQAAAEAAAAAAdd52hwAAAAlwSFlzAAALEwAACxMBAJqcGAAACF5JREFUeAHtm2tsHFcVx/8zu+v1M01N0sS4apKqtAoVJC1QHi0ICRWpoqWgtihU9AsPwTfaDwiQ+IDoFyQqkKiQihBFINEHilKpikoUpVR90kRFbUPakDp12Ijajh27fsfr3Z3hd2a19to7XjvZubYEe+LZ2b33zrnn/O+559x75kZqUhOBJgJNBJoINBFoItBEoIlAE4EmAk0E/g8R8DZI58426fqSdLUvdQbSRFo6PSu9jTxzGyST+247pO0t0oP01McVpriy8kJACPldZDROUP/DzRJ/60PrZgHt0u0M7a9Retct6HeHtuoj6uRfSuMq6nVN6WmN6JgmBSAnMtL3Lkgvu4ZhXQDA3O9F+UevUVv2F/qQvqwr5Jma0cBXVPRUAIjHNaQf6zSf8xOA8LW8dLjSwsXdOQAo/ymUP7JXnR0HtEc7xUQQsz+GbB54XkpvhhO6W2/qjOaG8Q2fBYR3YponUoRFOqUs3P+yVZldT2svY9/JT1zeMpr3QvVnS+prLSnXUlBnOqs9YaeeCUY6igp3AteTPGL4JE5mh86I0b+9KN30A+3Qbm2in1rlL/ihXm8vKpcNNMv3PDY5kCqqt32zbstsY1roS/D5tCshnQKA8N/oVYvuU0+s8gbHydaiplA8xfjafLTLhCqEoW5r6WHC+D7tvk6RE3IJwCZG/+Of1GW4vFaEr7Xg4UygsTTKx6hWxFp2+O3a5XeYFdxME9xB8uQMACb/NsTdujtyejautTSUKbEKqC2vlGSxhSv9Nps4vV2O1gbOAEBoQr8ym2LHFxNH8xlMPx6aMgRW105UgLJYk5lR4uQMABjbkrY4uULIK6CdLf3qAWDGMRNGIbMADPOJaw9DZwAwXMPwH3tb09xq7TxSvLZ4QUerz2P8/wlmTcghuLy/UJngF2cATCAwXuuNoyxtz0XGsHSsMyhvXm0lDFKonQtm9G8AoN0xmuILkydnAJioCP74AJb7Jw3wa2lX6dBTV8lfEYC05+ng/KBmFNBSTySvepnjUqkS7oWd3UHW8ycf0ln2uZM1IPQU6H6pYUQStOL4jhVG9dfCOVYR3ksshZ9NWLQFdk4AYOX2VZzWU6j8PHa7fRjrvVf/VL/Y8VdFhS1FX9vn/cgZmkSGRRvKv1Wc0M/nTtE6wA+E11H+HGD+6DLpcmuXJMXg3xD7DLH7YZzXd3eK9by6iIUpjTINDuPDdlD2S12rr7A08iMg8ABIkGMfYIuiSXaDRxj13+TPqBQGulXdxD5f7+qC3mC7TNPjjNg9WERim6NEAcDz/4RY9eC39UH9TNewErK9kFGoxzSo+5F7BGu4mdXhneQDPsrmqAtPMU7Zi/6kDhA43sHx7Qa2R/j8HAAYzRNKn2CD/H2dwieUXsOqPk/xjNU1SokBwKqnhwTGiS/o8u5DupHxNdbVPj7FSE7rIeW0n7hwntFeTlcBmO0bHtBV+kAEnu0WKpTWw2yQDUSmwzdZZPyhUtPIPTEAmPd3IdT+x3S99qkXmeL2/NadF4XF44CRw7RtnncB19Vqi6bM5gXFq8EzFT1Ay+sGHbVkyX7gu8dKGyULxYkQY9VjzK5cYeNT7sSUCqOpcWvUrhr/UKEX6Fy6oAH2CNby2rk0GdNKm5CJk9YWxv89zW8v82v8MzEAEKUi6RqkKgNRaWjb4bF0oEEcoe0PjCz4v9VW1MdmM2LD6IySBOCShDzNNudsSyAbaNN9IS7zfZqC8VQgC5euyB3nNUhsyuVQ3qiSEKl+zKzAMkYuaUMBGMW2TUn+ViTfGjikDQWgWC8bgtJWHZctShKPDQVgLaPrWkDX/OsO1lpG13yDS9pYAFZRzmb//zQAq6FvAPh1XWTjtrGaDI33UIdDag0e3nEUXFx31JHTWVUU++tMg7IFOOs+YryxFrCKbktWhqu0vdTqDQWgXudmGJEF1LGQS1W6+rl6MlS3c/Ld1gGm5EpkwtWrX+m5iylPDAAYDVveup89/lrFtnVAPQUtAixGAU9jJFHOkRPgudGLUbJe28QAwFJfhdnU79itz0XZntVZ2xyvCwD15ShgrVJ6FN5DpM8A4HA9pS6mbi2LsTXxI0Mz0SK/O6e5z/SRrruB8wDdIikO2X4vTtEShQPsBuOmuZW1MkV6C+koWfoIqfWfkhKDTpF9up/EqL16a5ji5GqEaQenvv5IKvuuK1De3gybepbg/DCJr+UHJPLsdo52cDIIKZYL0uL5Opgf0Mv5EVKleY6VXSAf5OXSCu8muf5aI0JWP5t0QmQG5feRC/7W+yrc97zG99BZ58gK7zXLc7xanMXvVtcXTOtFjZcQsg9bOsR7pF+h/NnFVo1/W32iXnwfRczztzjEWwDi9zaydgwujqxu0cktbRFwQmQmjJ7r5/MmeD6Ae01UeevRBQALmsA8Z3N5FMdVa+SUUGlXHNnUmSoDMEL9VFybJMqcAoBu9oqc8GUA1JJZQJwXtnJOh2kaAPh+vvbJ5ErWBYDzK/qAcpiLM4IC7nOadwsAEIGYnMpLOTkFAOc1ggKBvQRZHgEqYsQJYG+Vzgf56ILHYKWti3tc/4n1w8u7M7zeHnwBN/hKdMCj1uCXC2DmbyHwmfkh4n/0dukfiQkUw2h5/zFNGirioIj35znM+Ts6yQtyOyNgICxe3UFaWRS2E2GtlGe4P5V/TwcKA3Y24F+8bP1bQxKs8rAB7pQ4H9pdkHeI9cEntqDePm+bbvS6GOVytzOEATtFYj85DaK/h5N6tTTGL2+WuH8ny70jTgVcD+b25rhN/pMsZhjQaOVrfm/hwgyj/zMACNGd1eRx1hBfXA/ZnFtAtRKcE9/LrN6D5nZkvIYQxlY+/Yz6K9ztOIlz+i9kO1tq7Bcp2AAAAABJRU5ErkJggg==", iconSize: [32, 32], iconAnchor: [16, 16] });
+let playersOn = false, playersData = [], lastPlayerFetch = 0, playerTimer = null;
+
+function renderPlayers() {
+  playerLayer.clearLayers();
+  if (!playersOn) return;
+  const b = map.getBounds();
+  let n = 0;
+  for (const p of playersData) {
+    if (!b.contains([p.latitude, p.longitude])) continue;
+    n++;
+    const m = L.marker([p.latitude, p.longitude], { icon: PLAYER_ICON, zIndexOffset: 900 });
+    m.bindTooltip(p.name, { direction: "top" });
+    m.bindPopup(`<div class="pop-name">${esc(p.name)}</div><div>Active on the map now</div>` +
+      `<div style="margin-top:6px"><a href="https://turfgame.com/user/${encodeURIComponent(p.name)}" target="_blank">Profile ↗</a></div>`);
+    m.addTo(playerLayer);
+  }
+  return n;
+}
+
+async function fetchPlayers() {
+  if (!playersOn) return;
+  if (Date.now() - lastPlayerFetch < 60000) return; // honour ≤1 call/min
+  lastPlayerFetch = Date.now();
+  try {
+    const res = await fetch("https://api.turfgame.com/v5/users/location");
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    playersData = await res.json();
+    const inView = renderPlayers();
+    setStatus(`${playersData.length} players active worldwide · ${inView} in view.`);
+  } catch (e) {
+    lastPlayerFetch = 0; // let it retry sooner after a failure
+    setStatus("Active players fetch failed: " + e.message);
+  }
+}
+
+document.getElementById("players").onclick = () => {
+  const btn = document.getElementById("players");
+  playersOn = !playersOn;
+  if (playersOn) {
+    btn.classList.add("on"); btn.title = "Hide active players";
+    // Re-draw whatever we already have so re-enabling is instant even inside the
+    // 60 s window; fetchPlayers() then refreshes only if the gate is open.
+    if (playersData.length) {
+      const inView = renderPlayers();
+      setStatus(`${playersData.length} players active worldwide · ${inView} in view.`);
+    }
+    fetchPlayers();                              // refresh if ≥60 s since last call
+    playerTimer = setInterval(fetchPlayers, 60000);
+  } else {
+    btn.classList.remove("on"); btn.title = "Show active players (refreshes ≤ once/min)";
+    clearInterval(playerTimer); playerTimer = null;
+    playerLayer.clearLayers();
+  }
+};
+
+// Panning re-filters the cached players to the new view without a new API call
+// (a fresh fetch only happens on the 60 s timer).
+map.on("moveend", () => { if (playersOn) renderPlayers(); });
+
+// ---- startup + location -------------------------------------------------
+// Show the user's position as a blue dot. By default we take a single fix on
+// load (cheap); the 📍 button toggles continuous follow (watchPosition, which
+// keeps the GPS radio on and costs battery) for when you want the dot to track
+// you as you move. The first fix — or the error fallback — triggers a zone load.
+let myMarker = null, centeredOnce = false, watchId = null;
 function onPosition(p) {
   const ll = [p.coords.latitude, p.coords.longitude];
   if (!myMarker) {
@@ -311,11 +430,28 @@ function onPosition(p) {
   }
   if (!centeredOnce) { centeredOnce = true; map.setView(ll, 14); }
 }
+
+document.getElementById("follow").onclick = () => {
+  const b = document.getElementById("follow");
+  if (watchId != null) {
+    navigator.geolocation.clearWatch(watchId); watchId = null;
+    b.classList.remove("on"); b.title = "Follow my location (keeps GPS on)";
+    setStatus("Location follow off.");
+    return;
+  }
+  if (!navigator.geolocation) { setStatus("Geolocation not available on this device."); return; }
+  watchId = navigator.geolocation.watchPosition(
+    onPosition, e => setStatus("Location error: " + e.message),
+    { enableHighAccuracy: true, timeout: 15000, maximumAge: 2000 });
+  b.classList.add("on"); b.title = "Following — tap to stop";
+  setStatus("Following your location — keep this tab open.");
+};
+
 if (navigator.geolocation) {
-  navigator.geolocation.watchPosition(
+  navigator.geolocation.getCurrentPosition(
     onPosition,
     () => { if (!centeredOnce) loadZones(); },
-    { enableHighAccuracy: true, timeout: 10000, maximumAge: 5000 }
+    { enableHighAccuracy: true, timeout: 10000 }
   );
 } else {
   loadZones();

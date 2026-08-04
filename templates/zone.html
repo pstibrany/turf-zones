@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="light dark" />
+<title>Turf — zone activity</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f6f8; --card: #ffffff; --ink: #16181d;
+    --muted: #6b7280; --line: rgba(0,0,0,0.08); --accent: #007aff;
+    --gain: #1e874b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #131418; --card: #1c1e24; --ink: #e8e9ec;
+      --muted: #9aa0aa; --line: rgba(255,255,255,0.10); --accent: #4da3ff;
+      --gain: #4ade80;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: max(12px, env(safe-area-inset-top)) 12px calc(24px + env(safe-area-inset-bottom));
+  }
+  main { max-width: 640px; margin: 0 auto; }
+  header { padding: 4px 4px 12px; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+  .sub a { color: var(--accent); text-decoration: none; }
+
+  nav { margin: 0 0 14px; padding: 0 4px; font-size: 13px; display: flex; gap: 16px; }
+  nav a { color: var(--accent); text-decoration: none; }
+  nav a:hover { text-decoration: underline; }
+
+  .card {
+    background: var(--card); border-radius: 14px; overflow: hidden;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.06), 0 4px 16px rgba(0,0,0,0.05);
+  }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  thead th {
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--muted); font-weight: 600; text-align: left;
+    padding: 10px 8px 8px; border-bottom: 1px solid var(--line);
+  }
+  td { padding: 9px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  tr:last-child td { border-bottom: 0; }
+  td.time { color: var(--muted); font-size: 12.5px; }
+  td.taker { font-weight: 600; width: 99%; }
+  td.taker a { color: inherit; text-decoration: none; }
+  td.taker a:hover { color: var(--accent); text-decoration: underline; }
+  .from { color: var(--muted); font-weight: 400; }
+  .from a { color: inherit; text-decoration: none; }
+  .from a:hover { color: var(--accent); text-decoration: underline; }
+  td.pts { text-align: right; color: var(--muted); padding-right: 12px; }
+  .empty { padding: 22px 14px; color: var(--muted); text-align: center; font-size: 13.5px; }
+  .summary { display: flex; flex-wrap: wrap; gap: 6px 12px; margin: 0 0 12px; padding: 0 2px; font-size: 12.5px; color: var(--muted); }
+  .summary span b { color: var(--ink); font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<main>
+  <nav><a href="/">Leaderboard</a><a href="/zones">Zone map</a><a href="/activity">Activity</a></nav>
+
+  <header>
+    <h1 id="title">Zone activity</h1>
+    <div class="sub" id="sub">{{ .Area }} · takeovers are tracked for this area only</div>
+  </header>
+
+  <div class="summary" id="summary"></div>
+  <div class="card" id="events"></div>
+</main>
+
+<script>
+const ZONE = {{ .Zone }};
+const ZONE_ID = {{ .ZoneID }};
+
+if (ZONE) {
+  document.getElementById("title").textContent = ZONE;
+  document.getElementById("sub").innerHTML =
+    'Takeovers of this zone · <a href="https://turfgame.com/zone/' + encodeURIComponent(ZONE) +
+    '" target="_blank">turfgame.com ↗</a>';
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function fmtTime(iso) {
+  const d = new Date(iso);
+  return d.toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+function user(name) {
+  return name ? '<a href="https://turfgame.com/user/' + encodeURIComponent(name) + '" target="_blank">' + esc(name) + "</a>" : "";
+}
+
+async function load() {
+  const el = document.getElementById("events");
+  if (!ZONE_ID) { el.innerHTML = '<div class="empty">No zone selected.</div>'; return; }
+  let rows = [];
+  try {
+    const resp = await fetch("/api/zone-activity?zone_id=" + encodeURIComponent(ZONE_ID) + "&limit=200");
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    rows = await resp.json();
+  } catch (err) {
+    el.innerHTML = '<div class="empty">Failed to load: ' + esc(err.message) + "</div>";
+    return;
+  }
+  if (!rows.length) {
+    el.innerHTML = '<div class="empty">No recorded takeovers.<br />Only zones inside the monitored area are tracked.</div>';
+    return;
+  }
+
+  // Count in the subheader, and a per-taker tally (who has captured it most).
+  const sub = document.getElementById("sub");
+  const zlink = ZONE ? ' · <a href="https://turfgame.com/zone/' + encodeURIComponent(ZONE) + '" target="_blank">turfgame.com ↗</a>' : "";
+  sub.innerHTML = "<b>" + rows.length + "</b> takeover" + (rows.length === 1 ? "" : "s") + " tracked" + zlink;
+
+  const tally = {};
+  for (const r of rows) tally[r.taker] = (tally[r.taker] || 0) + 1;
+  document.getElementById("summary").innerHTML = Object.entries(tally)
+    .sort((a, b) => b[1] - a[1] || a[0].toLowerCase().localeCompare(b[0].toLowerCase()))
+    .map(([name, n]) => "<span>" + user(name) + " <b>×" + n + "</b></span>")
+    .join("");
+
+  const body = rows.map(r =>
+    "<tr>" +
+    '<td class="time">' + fmtTime(r.time) + "</td>" +
+    '<td class="taker">' + user(r.taker) +
+      (r.previous_owner ? ' <span class="from">← ' + user(r.previous_owner) + "</span>" : "") + "</td>" +
+    '<td class="pts">' + (r.points ? "+" + r.points : "") + "</td>" +
+    "</tr>").join("");
+  el.innerHTML = "<table><thead><tr><th>When</th><th>Taken by</th><th class=\"pts\">Pts</th></tr></thead><tbody>" + body + "</tbody></table>";
+}
+load();
+</script>
+</body>
+</html>

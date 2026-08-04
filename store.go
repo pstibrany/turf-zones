@@ -336,6 +336,31 @@ func (s *store) takeoverCounts(ctx context.Context, since time.Time) (map[int64]
 //
 // Matching is by name (case-insensitive) to mirror the graphs picker, which
 // deals in names rather than ids.
+// takeoversForZone returns the most recent takeovers of one zone (by id),
+// newest first. Only zones inside the monitored area have any, since that is
+// all the feed stores.
+func (s *store) takeoversForZone(ctx context.Context, zoneID int64, limit int) ([]takeover, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT time, taker_name, previous_owner_name, takeover_points
+		FROM takeovers WHERE zone_id = ? ORDER BY time DESC LIMIT ?`, zoneID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("takeovers for zone: %w", err)
+	}
+	defer rows.Close()
+
+	out := []takeover{}
+	for rows.Next() {
+		var t takeover
+		var ts int64
+		if err := rows.Scan(&ts, &t.TakerName, &t.PreviousOwnerName, &t.TakeoverPoints); err != nil {
+			return nil, err
+		}
+		t.Time = time.Unix(ts, 0).UTC()
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 func (s *store) takeoversForPlayers(ctx context.Context, names []string, from, to time.Time, limit int) ([]takeover, error) {
 	if len(names) == 0 {
 		return nil, nil

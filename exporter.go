@@ -38,7 +38,7 @@ const feedCursorKey = "feed.takeover.cursor"
 // and rendered, static/ is served verbatim — the zone map is a self-contained
 // page of HTML and JavaScript that would only be mangled by a template parser.
 //
-//go:embed templates/leaderboard.html templates/status.html templates/graphs.html templates/activity.html
+//go:embed templates/leaderboard.html templates/status.html templates/graphs.html templates/activity.html templates/zone.html
 var templateFS embed.FS
 
 //go:embed static/zones.html
@@ -998,10 +998,12 @@ func (e *exporter) publicMux() *http.ServeMux {
 	mux.HandleFunc("GET /healthz", handleHealthz)
 	mux.HandleFunc("GET /api/graph", e.handleGraphData)
 	mux.HandleFunc("GET /api/activity", e.handleActivityData)
+	mux.HandleFunc("GET /api/zone-activity", e.handleZoneActivityData)
 	mux.HandleFunc("GET /zones", handleZoneMap)
 	mux.HandleFunc("GET /tour", handleTour)
 	mux.HandleFunc("GET /graphs", e.handleGraphs)
 	mux.HandleFunc("GET /activity", e.handleActivity)
+	mux.HandleFunc("GET /zone", e.handleZonePage)
 	mux.HandleFunc("GET /status", e.handleStatus)
 	mux.HandleFunc("GET /{$}", e.handleLeaderboard)
 	return mux
@@ -1264,6 +1266,57 @@ func (e *exporter) handleActivity(w http.ResponseWriter, r *http.Request) {
 		"Players":  e.pickerPlayers(r.Context()),
 		"Defaults": strings.Join(e.cfg.Players, ","),
 	})
+}
+
+// handleZonePage renders the per-zone activity page. The zone name and id come
+// from the query (the map popup links here); the browser fetches the takeover
+// list from /api/zone-activity.
+func (e *exporter) handleZonePage(w http.ResponseWriter, r *http.Request) {
+	e.renderPage(w, "zone.html", map[string]any{
+		"Zone":   r.URL.Query().Get("zone"),
+		"ZoneID": r.URL.Query().Get("zone_id"),
+		"Area":   e.sel.summary,
+	})
+}
+
+// zoneTakeover is one takeover of a single zone, for /api/zone-activity.
+type zoneTakeover struct {
+	Time          time.Time `json:"time"`
+	Taker         string    `json:"taker"`
+	PreviousOwner string    `json:"previous_owner"`
+	Points        int64     `json:"points"`
+}
+
+// handleZoneActivityData serves a single zone's takeover history (newest first)
+// as JSON. Public, like the other read endpoints. Only zones in the monitored
+// area have data — everywhere else returns an empty array.
+func (e *exporter) handleZoneActivityData(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.URL.Query().Get("zone_id"), 10, 64)
+	if err != nil || id <= 0 {
+		httpError(w, http.StatusBadRequest, "zone_id must be a positive integer")
+		return
+	}
+	limit := 100
+	if v := r.URL.Query().Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			httpError(w, http.StatusBadRequest, "limit must be a positive integer")
+			return
+		}
+		limit = min(n, 1000)
+	}
+
+	rows, err := e.store.takeoversForZone(r.Context(), id, limit)
+	if err != nil {
+		e.log.Error("zone activity query failed", "err", err)
+		httpError(w, http.StatusInternalServerError, "query failed")
+		return
+	}
+	out := make([]zoneTakeover, 0, len(rows))
+	for _, t := range rows {
+		out = append(out, zoneTakeover{Time: t.Time, Taker: t.TakerName, PreviousOwner: t.PreviousOwnerName, Points: t.TakeoverPoints})
+	}
+	writeJSON(w, r, e.log, out)
 }
 
 // activityEvent is one zone change from a single player's perspective: they
