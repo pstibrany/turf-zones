@@ -47,6 +47,10 @@
   .filterbar input { padding: 5px 8px; flex: 1 1 120px; min-width: 0; }
   .filterbar button { flex: 0 0 auto; padding: 5px 10px; }
   .filterbar button.on { background: #007aff; color: #fff; border-color: #007aff; }
+  .radiusbar { padding: 4px 14px 8px; display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; font-size: 12px; }
+  .radiusbar label { display: flex; align-items: center; gap: 5px; }
+  .radiusbar select { padding: 4px 6px; border-radius: 8px; border: 1px solid rgba(128,128,128,0.4); background: rgba(128,128,128,0.08); color: inherit; font: inherit; }
+  .radiusbar .rinfo { opacity: 0.8; flex: 1 1 100%; }
   .legend { overflow-y: auto; padding: 0 6px 8px; }
   .legend-title { padding: 6px 8px 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; opacity: 0.55; }
   .owner {
@@ -84,6 +88,19 @@
     <button id="follow" title="Follow my location (keeps GPS on)">📍</button>
     <button id="players" title="Show active players (refreshes ≤ once/min)">🏃</button>
     <button id="valuemode" title="Size zones by value (points/hour)">💎</button>
+  </div>
+  <div class="radiusbar">
+    <label><input type="checkbox" id="radiuson" /> Zones within</label>
+    <select id="radiussel">
+      <option value="250" selected>250 m</option>
+      <option value="500">500 m</option>
+      <option value="1000">1 km</option>
+      <option value="2000">2 km</option>
+      <option value="3000">3 km</option>
+      <option value="5000">5 km</option>
+      <option value="10000">10 km</option>
+    </select>
+    <span class="rinfo" id="radiusinfo"></span>
   </div>
   <div class="legend">
     <div class="legend-title" id="legend-title">Owners in view — tick to show only those</div>
@@ -142,6 +159,12 @@ function ago(iso) {
   return "just now";
 }
 function esc(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function haversine(aLat, aLng, bLat, bLng) {
+  const R = 6371000, toR = Math.PI / 180;
+  const dLat = (bLat - aLat) * toR, dLng = (bLng - aLng) * toR;
+  const s = Math.sin(dLat/2)**2 + Math.cos(aLat*toR)*Math.cos(bLat*toR)*Math.sin(dLng/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(s));
+}
 function setStatus(m) { document.getElementById("status").textContent = m; }
 function setBusy(b) { /* no visible busy control; loadToken cancels stale loads */ }
 
@@ -270,6 +293,7 @@ function render() {
   }
   buildLegend();
   applyFilter();
+  updateRadius();
 }
 
 function buildLegend() {
@@ -417,9 +441,10 @@ map.on("moveend", () => { if (playersOn) renderPlayers(); });
 // load (cheap); the 📍 button toggles continuous follow (watchPosition, which
 // keeps the GPS radio on and costs battery) for when you want the dot to track
 // you as you move. The first fix — or the error fallback — triggers a zone load.
-let myMarker = null, centeredOnce = false, watchId = null;
+let myMarker = null, centeredOnce = false, watchId = null, myPos = null;
 function onPosition(p) {
-  const ll = [p.coords.latitude, p.coords.longitude];
+  myPos = { lat: p.coords.latitude, lng: p.coords.longitude };
+  const ll = [myPos.lat, myPos.lng];
   if (!myMarker) {
     myMarker = L.marker(ll, {
       icon: L.divIcon({ className: "", html: '<div class="meicon"></div>', iconSize: [16, 16], iconAnchor: [8, 8] }),
@@ -429,7 +454,44 @@ function onPosition(p) {
     myMarker.setLatLng(ll);
   }
   if (!centeredOnce) { centeredOnce = true; map.setView(ll, 14); }
+  updateRadius();
 }
+
+// ---- "zones within radius" tool ----------------------------------------
+// Draw a circle at the user's location and count loaded zones inside it. The
+// count reflects zones currently loaded on the map, so panning to load the area
+// around you first gives an accurate number.
+let radiusCircle = null;
+function updateRadius() {
+  const on = document.getElementById("radiuson").checked;
+  const info = document.getElementById("radiusinfo");
+  if (!on) {
+    if (radiusCircle) { map.removeLayer(radiusCircle); radiusCircle = null; }
+    info.textContent = "";
+    return;
+  }
+  if (!myPos) {
+    info.textContent = "waiting for your location…";
+    if (navigator.geolocation) navigator.geolocation.getCurrentPosition(onPosition, () => {}, { enableHighAccuracy: true, maximumAge: 10000, timeout: 15000 });
+    return;
+  }
+  const r = parseInt(document.getElementById("radiussel").value, 10);
+  if (!radiusCircle) {
+    radiusCircle = L.circle([myPos.lat, myPos.lng], { radius: r, color: "#007aff", weight: 1.5, fillColor: "#007aff", fillOpacity: 0.08, interactive: false }).addTo(map);
+  } else {
+    radiusCircle.setLatLng([myPos.lat, myPos.lng]);
+    radiusCircle.setRadius(r);
+  }
+  let n = 0;
+  for (const z of zonesById.values()) {
+    if (haversine(myPos.lat, myPos.lng, z.latitude, z.longitude) <= r) n++;
+  }
+  const label = r >= 1000 ? (r / 1000) + " km" : r + " m";
+  info.textContent = n + " zone" + (n === 1 ? "" : "s") + " within " + label +
+    " (of " + zonesById.size + " loaded)";
+}
+document.getElementById("radiuson").addEventListener("change", updateRadius);
+document.getElementById("radiussel").addEventListener("change", updateRadius);
 
 document.getElementById("follow").onclick = () => {
   const b = document.getElementById("follow");
