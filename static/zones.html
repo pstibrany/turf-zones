@@ -447,6 +447,16 @@ document.getElementById("follow").onclick = () => {
   setStatus("Following your location — keep this tab open.");
 };
 
+// Refresh the blue dot with a single fresh fix when the page becomes visible
+// again (e.g. back from another app), unless follow mode is already tracking.
+// No periodic timer here — viewing the map doesn't need constant updates.
+function refreshLocation() {
+  if (!navigator.geolocation || watchId != null) return;
+  navigator.geolocation.getCurrentPosition(onPosition, () => {}, { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 });
+}
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") refreshLocation(); });
+window.addEventListener("focus", refreshLocation);
+
 if (navigator.geolocation) {
   navigator.geolocation.getCurrentPosition(
     onPosition,

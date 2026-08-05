@@ -416,6 +416,20 @@ function onPosition(p) {
   if (changed) { const left = tour.filter(id => !reached.has(id)).length; setStatus(left ? `Reached a zone · ${left} to go.` : "All stops reached 🎉"); }
 }
 
+// refreshLocation takes a single fresh fix (no continuous tracking) and runs it
+// through onPosition, so returning to the page after navigating in Maps updates
+// the dot and auto-marks any zone just reached — no need to toggle live
+// tracking. Skipped while live tracking is already running.
+function refreshLocation() {
+  if (!navigator.geolocation || watchId != null) return;
+  navigator.geolocation.getCurrentPosition(onPosition, () => {}, { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 });
+}
+// Re-check on return to the page (the key moment: back from the Maps app) and,
+// as a backstop, once a minute while the page is actually visible.
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") refreshLocation(); });
+window.addEventListener("focus", refreshLocation);
+setInterval(() => { if (document.visibilityState === "visible") refreshLocation(); }, 60000);
+
 // ---------- events ----------
 document.getElementById("optimize").onclick = optimize;
 document.getElementById("clear").onclick = clearTour;
