@@ -125,7 +125,7 @@
 const API = "https://api.turfgame.com/v5/zones";
 const CPH = [55.6761, 12.5683];
 const MAX_LAT = 0.12, MAX_LNG = 0.18, MAX_TILES = 60, REQ_SPACING_MS = 1100, RETRY_BACKOFF_MS = 1500;
-const REACH_M = 30;   // within this many metres a zone counts as reached in live mode
+const REACH_M = 50;   // within this many metres a zone counts as reached
 
 const map = L.map("map", { zoomControl: false }).setView(CPH, 14);
 L.control.zoom({ position: "bottomright" }).addTo(map);
