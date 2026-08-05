@@ -233,7 +233,7 @@ function addZoneMarker(z) {
   // interactive Leaflet path is still tappable across its whole radius.
   const hit = L.circleMarker(ll, { radius: 18, stroke: false, fill: true, fillOpacity: 0 });
   hit.on("click", () => toggleZone(z.id));
-  hit.bindTooltip(z.name, { direction: "top" });
+  hit.bindTooltip(esc(z.name), { direction: "top" });
   hit.addTo(zoneLayer);
   // The visible dot is non-interactive so taps always fall through to the hit
   // circle (avoids ambiguity where the two overlap).

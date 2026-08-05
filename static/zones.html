@@ -285,7 +285,7 @@ function render() {
     // fall through to it.
     const hit = L.circleMarker(ll, { radius: 16, stroke: false, fill: true, fillOpacity: 0 });
     hit.bindPopup(() => popupHtml(z), { maxWidth: 340, minWidth: 220 });
-    hit.bindTooltip(`${z.name} — ${owner}`, { direction: "top" });
+    hit.bindTooltip(`${esc(z.name)} — ${esc(owner)}`, { direction: "top" });
     hit.addTo(zoneLayer);
     const m = L.circleMarker(ll, { radius: 6, weight: 1.5, color: "#fff", fillColor: color, fillOpacity: 0.9, interactive: false });
     m.addTo(zoneLayer);
@@ -388,7 +388,7 @@ function renderPlayers() {
     if (!b.contains([p.latitude, p.longitude])) continue;
     n++;
     const m = L.marker([p.latitude, p.longitude], { icon: PLAYER_ICON, zIndexOffset: 900 });
-    m.bindTooltip(p.name, { direction: "top" });
+    m.bindTooltip(esc(p.name), { direction: "top" });
     m.bindPopup(`<div class="pop-name">${esc(p.name)}</div><div>Active on the map now</div>` +
       `<div style="margin-top:6px"><a href="https://turfgame.com/user/${encodeURIComponent(p.name)}" target="_blank">Profile ↗</a></div>`);
     m.addTo(playerLayer);
