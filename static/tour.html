@@ -35,10 +35,11 @@
 
   .controls { padding: 6px 14px 8px; display: flex; flex-direction: column; gap: 8px; }
   .row { display: flex; gap: 6px; align-items: center; }
-  button, select {
+  button, select, input[type=text] {
     font: inherit; padding: 7px 10px; border-radius: 8px; border: 1px solid rgba(128,128,128,0.4);
     background: rgba(128,128,128,0.08); color: inherit;
   }
+  .controls input[type=text] { flex: 1 1 auto; min-width: 0; }
   button { cursor: pointer; flex: 1; }
   button.primary { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600; }
   button.live-on { background: var(--done); border-color: var(--done); color: #fff; font-weight: 600; }
@@ -47,8 +48,10 @@
   label.inline { font-size: 12px; opacity: 0.8; display: flex; align-items: center; gap: 5px; flex: 0 0 auto; }
 
   .status { padding: 0 14px 6px; font-size: 11px; opacity: 0.75; min-height: 14px; }
-  .totals { padding: 2px 14px 8px; font-size: 12.5px; }
+  .totals { padding: 2px 14px 4px; font-size: 12.5px; }
   .totals b { font-variant-numeric: tabular-nums; }
+  .stats { padding: 0 14px 8px; font-size: 12px; opacity: 0.85; }
+  .stats b { font-variant-numeric: tabular-nums; }
 
   .tourlist { overflow-y: auto; padding: 0 8px 10px; border-top: 1px solid rgba(128,128,128,0.2); }
   .tourlist:empty::after {
@@ -69,7 +72,7 @@
   .stop .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .stop .meta { font-size: 11px; opacity: 0.65; font-variant-numeric: tabular-nums; }
   .stop a.maps { flex: 0 0 auto; font-size: 16px; text-decoration: none; padding: 2px 4px; }
-  .stop button.rm { flex: 0 0 auto; width: auto; padding: 2px 6px; font-size: 13px; opacity: 0.6; background: none; border: none; }
+  .stop button.rm { flex: 0 0 auto; width: auto; padding: 6px 14px; font-size: 16px; line-height: 1; opacity: 0.55; background: none; border: none; }
 
   .leaflet-popup-content { font: 13px/1.45 -apple-system, sans-serif; }
   .pop-name { font-size: 15px; font-weight: 700; margin-bottom: 4px; }
@@ -102,21 +105,24 @@
     </div>
     <div class="row">
       <label class="inline"><input type="checkbox" id="fromme" checked /> Start from my location</label>
+      <label class="inline"><input type="checkbox" id="roundtrip" /> Return to start</label>
+    </div>
+    <div class="row">
+      <input type="text" id="myname" placeholder="Your Turf name (for revisit stat)" autocapitalize="off" autocorrect="off" spellcheck="false" />
       <select id="mode" title="Travel mode">
         <option value="walking">Walk</option>
         <option value="bicycling">Bike</option>
       </select>
     </div>
     <div class="row">
-      <button id="gmaps">Full route in Google Maps ↗</button>
-    </div>
-    <div class="row">
+      <button id="removereached">Remove reached</button>
       <button id="live">Start live tracking</button>
     </div>
   </div>
 
   <div class="status" id="status">Locating…</div>
   <div class="totals" id="totals"></div>
+  <div class="stats" id="stats"></div>
   <div class="tourlist" id="tourlist"></div>
 </div>
 
@@ -144,7 +150,10 @@ let loadToken = 0;
 
 let tour = [];                   // ordered array of zone ids
 const inTour = new Set();        // membership mirror of tour
-const reached = new Set();       // zone ids visited (live mode)
+const reached = new Set();       // zone ids visited
+// stopData holds everything needed to render a stop without the Turf API, so a
+// saved tour survives a reload before zones re-load. id -> {id,name,lat,lng,owner}
+const stopData = new Map();
 
 let myPos = null;                // {lat,lng} from geolocation
 let myMarker = null;
@@ -164,7 +173,12 @@ function haversine(a, b) {
   const h = Math.sin(dLat/2)**2 + Math.cos(la1)*Math.cos(la2)*Math.sin(dLng/2)**2;
   return 2 * R * Math.asin(Math.sqrt(h));
 }
-function coordOf(id) { const z = zonesById.get(id); return { lat: z.latitude, lng: z.longitude }; }
+function coordOf(id) {
+  const s = stopData.get(id);
+  if (s) return { lat: s.lat, lng: s.lng };
+  const z = zonesById.get(id);
+  return { lat: z.latitude, lng: z.longitude };
+}
 
 // Owner colouring, matching the /zones ownership map: a deterministic hue per
 // owner name so the same player is the same colour on both pages.
@@ -254,40 +268,100 @@ function styleMarker(id) {
 // ---------- tour editing ----------
 function toggleZone(id) {
   if (inTour.has(id)) { inTour.delete(id); tour = tour.filter(x => x !== id); reached.delete(id); }
-  else { inTour.add(id); tour.push(id); }
+  else {
+    inTour.add(id); tour.push(id);
+    const z = zonesById.get(id);
+    if (z) stopData.set(id, { id, name: z.name, lat: z.latitude, lng: z.longitude, owner: z.currentOwner ? z.currentOwner.name : "" });
+  }
   styleMarker(id);
-  refresh();
+  refresh(); saveTour();
 }
 function removeZone(id) { if (inTour.has(id)) toggleZone(id); }
 function clearTour() {
-  for (const id of tour) { inTour.delete(id); reached.delete(id); styleMarker(id); }
-  tour = [];
-  refresh();
+  const ids = tour.slice();
+  tour = []; inTour.clear(); reached.clear(); stopData.clear();
+  for (const id of ids) styleMarker(id);
+  refresh(); saveTour();
+}
+// Remove reached (visited) zones from the plan.
+function removeReached() {
+  for (const id of [...reached]) { inTour.delete(id); reached.delete(id); stopData.delete(id); styleMarker(id); }
+  tour = tour.filter(id => inTour.has(id));
+  refresh(); saveTour();
+}
+function roundTrip() { return document.getElementById("roundtrip").checked; }
+
+// ---------- persistence (localStorage) ----------
+// Remember the planned trip so Safari dropping the page from memory doesn't lose
+// it. We store the stops (with coords/names/owner) plus reached ids and options.
+const STORE_KEY = "turf.tour.v1";
+function saveTour() {
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify({
+      stops: tour.map(id => stopData.get(id)).filter(Boolean),
+      reached: [...reached],
+      roundTrip: roundTrip(),
+      fromme: document.getElementById("fromme").checked,
+      mode: document.getElementById("mode").value,
+      myName: document.getElementById("myname").value,
+    }));
+  } catch (e) { /* storage full or unavailable — non-fatal */ }
+}
+function loadTour() {
+  let s;
+  try { s = JSON.parse(localStorage.getItem(STORE_KEY) || "null"); } catch (e) { return; }
+  if (!s || !Array.isArray(s.stops)) return;
+  for (const st of s.stops) {
+    if (st && st.id != null) { stopData.set(st.id, st); tour.push(st.id); inTour.add(st.id); }
+  }
+  (s.reached || []).forEach(id => reached.add(id));
+  if (s.roundTrip) document.getElementById("roundtrip").checked = true;
+  if (s.fromme === false) document.getElementById("fromme").checked = false;
+  if (s.mode) document.getElementById("mode").value = s.mode;
+  if (typeof s.myName === "string") document.getElementById("myname").value = s.myName;
 }
 
 // Order the tour: nearest-neighbour from the start, then 2-opt clean-up. The
 // start is my location when "Start from my location" is on and known, else the
-// first zone currently in the tour.
+// first zone currently in the tour (which is then kept first). With "Return to
+// start" on, the route is a closed loop back to that start.
 function optimize() {
-  if (tour.length < 2) { refresh(); return; }
-  const start = startPoint();
-  let remaining = tour.slice();
+  if (tour.length < 2) { refresh(); saveTour(); return; }
+  const rt = roundTrip();
+  const anchor = startPoint();       // my location, or null
+  let ids = tour.slice(), fixedFirst = null, start;
+  if (anchor) {
+    start = anchor;                  // home is a real point; optimise all zones
+  } else {
+    fixedFirst = ids[0];             // no home: keep the first zone as the anchor
+    start = coordOf(fixedFirst);
+    ids = ids.slice(1);
+  }
+
   const ordered = [];
-  let cur = start || coordOf(remaining[0]);
-  if (!start) { ordered.push(remaining[0]); cur = coordOf(remaining[0]); remaining = remaining.slice(1); }
+  let cur = start;
+  const remaining = ids.slice();
   while (remaining.length) {
     let bi = 0, bd = Infinity;
     for (let i = 0; i < remaining.length; i++) { const d = haversine(cur, coordOf(remaining[i])); if (d < bd) { bd = d; bi = i; } }
     ordered.push(remaining[bi]); cur = coordOf(remaining[bi]); remaining.splice(bi, 1);
   }
-  tour = twoOpt(ordered, start || coordOf(ordered[0]));
-  refresh();
+  const opt = twoOpt(ordered, start, rt ? start : null);
+  tour = fixedFirst != null ? [fixedFirst, ...opt] : opt;
+  refresh(); saveTour();
 }
 
-// Standard 2-opt on an open path with a fixed start coordinate.
-function twoOpt(order, start) {
+// 2-opt with a fixed start coordinate. If returnTo is set the path is a closed
+// loop (its length includes the leg from the last stop back to returnTo).
+function twoOpt(order, start, returnTo) {
   const dist = (a, b) => haversine(coordOf(a), coordOf(b));
-  const legLen = (o) => { let s = haversine(start, coordOf(o[0])); for (let i = 0; i < o.length-1; i++) s += dist(o[i], o[i+1]); return s; };
+  const legLen = (o) => {
+    if (!o.length) return 0;
+    let s = haversine(start, coordOf(o[0]));
+    for (let i = 0; i < o.length - 1; i++) s += dist(o[i], o[i + 1]);
+    if (returnTo) s += haversine(coordOf(o[o.length - 1]), returnTo);
+    return s;
+  };
   let best = order.slice(), improved = true;
   while (improved) {
     improved = false;
@@ -307,14 +381,18 @@ function startPoint() {
 
 // ---------- render tour list, route line, numbers, totals ----------
 function refresh() {
-  // Remaining (unreached) zones drive the route line and numbering in live mode.
+  // Remaining (unreached) zones drive the route line, numbering and stats.
   const remainingIds = tour.filter(id => !reached.has(id));
   const start = startPoint();
+  const rt = roundTrip();
 
-  // Route line: start (if any) through remaining zones in order.
+  // Route line: start (if any) → remaining zones → back to start (round trip).
   const pts = [];
   if (start) pts.push([start.lat, start.lng]);
   for (const id of remainingIds) { const c = coordOf(id); pts.push([c.lat, c.lng]); }
+  let closeTo = null;
+  if (rt && remainingIds.length) closeTo = start || coordOf(remainingIds[0]);
+  if (closeTo) pts.push([closeTo.lat, closeTo.lng]);
   routeLine.setLatLngs(pts);
 
   // Numbered markers over the tour zones.
@@ -329,57 +407,68 @@ function refresh() {
   const legs = [];
   let prev = start, total = 0;
   for (const id of remainingIds) { const c = coordOf(id); const d = prev ? haversine(prev, c) : null; if (d != null) total += d; legs.push(d); prev = c; }
+  if (rt && prev && closeTo) total += haversine(prev, closeTo);
 
   const totalsEl = document.getElementById("totals");
   if (remainingIds.length) {
-    totalsEl.innerHTML = `Remaining: <b>${fmtDist(total)}</b> over <b>${remainingIds.length}</b> stop(s)` +
-      (start ? "" : " · <span style='opacity:.7'>enable “start from my location” for the first leg</span>");
+    let txt = `Remaining: <b>${fmtDist(total)}</b> over <b>${remainingIds.length}</b> stop(s)`;
+    if (rt) txt += " · round trip";
+    if (!start && !rt) txt += " · <span style='opacity:.7'>enable “start from my location” for the first leg</span>";
+    totalsEl.innerHTML = txt;
   } else totalsEl.innerHTML = tour.length ? "All stops reached 🎉" : "";
+
+  renderStats(remainingIds);
 
   // Tour list.
   const list = document.getElementById("tourlist");
   list.innerHTML = "";
   let legIdx = 0;
   tour.forEach((id, idx) => {
-    const z = zonesById.get(id), done = reached.has(id);
+    const st = stopData.get(id) || { name: "?", lat: 0, lng: 0 };
+    const done = reached.has(id);
     const leg = done ? null : legs[legIdx++];
     const row = document.createElement("div");
     row.className = "stop" + (done ? " done" : "");
     row.innerHTML =
       `<span class="num">${done ? "✓" : idx+1}</span>` +
-      `<div class="body"><div class="name">${esc(z.name)}</div>` +
+      `<div class="body"><div class="name">${esc(st.name)}</div>` +
       `<div class="meta">${done ? "reached" : (leg != null ? fmtDist(leg) + " from previous" : "start point")}</div></div>` +
-      `<a class="maps" title="Directions in Apple Maps" target="_blank" href="https://maps.apple.com/?daddr=${z.latitude},${z.longitude}&dirflg=${appleDirflg()}">🗺️</a>` +
+      `<a class="maps" title="Directions in Apple Maps" target="_blank" href="https://maps.apple.com/?daddr=${st.lat},${st.lng}&dirflg=${appleDirflg()}">🗺️</a>` +
       `<button class="rm" title="Remove">✕</button>`;
     row.querySelector(".rm").onclick = () => removeZone(id);
-    row.querySelector(".name").onclick = () => map.panTo([z.latitude, z.longitude]);
+    row.querySelector(".name").onclick = () => map.panTo([st.lat, st.lng]);
     list.appendChild(row);
   });
 
-  document.getElementById("gmaps").disabled = tour.length === 0;
+  const rr = document.getElementById("removereached");
+  if (rr) rr.disabled = reached.size === 0;
   updateStatus();
 }
 
-// ---------- Google Maps full-route link ----------
-// Apple Maps direction flag for the current selection: w=walk, c=cycle. (The
-// newer mode=cycling parameter was not honoured on test; dirflg is.)
-function appleDirflg() { return document.getElementById("mode").value === "bicycling" ? "c" : "w"; }
-
-function openGoogle() {
-  const remainingIds = tour.filter(id => !reached.has(id));
-  if (!remainingIds.length) return;
-  const start = startPoint();
-  const pts = [];
-  if (start) pts.push(`${start.lat},${start.lng}`);
-  for (const id of remainingIds) { const c = coordOf(id); pts.push(`${c.lat},${c.lng}`); }
-  // Google Maps directions URLs allow ~10 points; trim the tail and warn.
-  let note = "";
-  if (pts.length > 10) { note = ` (first ${10} of ${pts.length} points — Google Maps caps waypoints)`; pts.length = 10; }
-  const mode = document.getElementById("mode").value;
-  const url = "https://www.google.com/maps/dir/" + pts.map(encodeURIComponent).join("/") + "?travelmode=" + mode;
-  if (note) setStatus("Opening Google Maps" + note);
-  window.open(url, "_blank");
+// renderStats summarises the remaining stops by current owner: neutral zones,
+// zones held by other players, and (when you've entered your name) revisits of
+// your own zones. Owner is captured when a zone is added, so it's a snapshot.
+function renderStats(ids) {
+  const el = document.getElementById("stats");
+  if (!el) return;
+  if (!ids.length) { el.innerHTML = ""; return; }
+  const myName = document.getElementById("myname").value.trim().toLowerCase();
+  let neutral = 0, mine = 0, other = 0;
+  for (const id of ids) {
+    const owner = ((stopData.get(id) || {}).owner || "").trim();
+    if (!owner) neutral++;
+    else if (myName && owner.toLowerCase() === myName) mine++;
+    else other++;
+  }
+  const parts = [`<b>${neutral}</b> neutral`, `<b>${other}</b> from ${myName ? "others" : "players"}`];
+  if (myName) parts.push(`<b>${mine}</b> revisit`);
+  el.innerHTML = parts.join(" · ") + (myName ? "" : ' · <span style="opacity:.7">enter your name for revisit count</span>');
 }
+
+// ---------- Apple Maps travel mode ----------
+// dirflg for the current selection: w=walk, c=cycle. (The newer mode=cycling
+// parameter was not honoured on test; dirflg is.)
+function appleDirflg() { return document.getElementById("mode").value === "bicycling" ? "c" : "w"; }
 
 // ---------- live tracking ----------
 async function toggleLive() {
@@ -413,7 +502,7 @@ function onPosition(p) {
     if (!reached.has(id) && haversine(myPos, coordOf(id)) <= REACH_M) { reached.add(id); styleMarker(id); changed = true; }
   }
   refresh();
-  if (changed) { const left = tour.filter(id => !reached.has(id)).length; setStatus(left ? `Reached a zone · ${left} to go.` : "All stops reached 🎉"); }
+  if (changed) { saveTour(); const left = tour.filter(id => !reached.has(id)).length; setStatus(left ? `Reached a zone · ${left} to go.` : "All stops reached 🎉"); }
 }
 
 // refreshLocation takes a single fresh fix (no continuous tracking) and runs it
@@ -433,16 +522,19 @@ setInterval(() => { if (document.visibilityState === "visible") refreshLocation(
 // ---------- events ----------
 document.getElementById("optimize").onclick = optimize;
 document.getElementById("clear").onclick = clearTour;
-document.getElementById("gmaps").onclick = openGoogle;
+document.getElementById("removereached").onclick = removeReached;
 document.getElementById("live").onclick = toggleLive;
-document.getElementById("fromme").onchange = refresh;
-document.getElementById("mode").onchange = refresh; // re-render per-stop Apple links for the new mode
+document.getElementById("fromme").onchange = () => { refresh(); saveTour(); };
+document.getElementById("roundtrip").onchange = () => { refresh(); saveTour(); };
+document.getElementById("mode").onchange = () => { refresh(); saveTour(); }; // per-stop Apple links + saved mode
+document.getElementById("myname").oninput = () => { refresh(); saveTour(); };
 document.getElementById("toggle").onclick = () => document.querySelector(".panel").classList.toggle("hidden");
 
 let moveTimer = null;
 map.on("moveend", () => { clearTimeout(moveTimer); moveTimer = setTimeout(loadZones, 400); });
 
 // ---------- startup ----------
+loadTour();   // restore a saved trip before first render
 if (navigator.geolocation) {
   navigator.geolocation.getCurrentPosition(
     p => { myPos = { lat: p.coords.latitude, lng: p.coords.longitude }; map.setView([myPos.lat, myPos.lng], 15); refresh(); },
