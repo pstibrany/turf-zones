@@ -38,7 +38,7 @@ const feedCursorKey = "feed.takeover.cursor"
 // and rendered, static/ is served verbatim — the zone map is a self-contained
 // page of HTML and JavaScript that would only be mangled by a template parser.
 //
-//go:embed templates/leaderboard.html templates/status.html templates/graphs.html templates/activity.html templates/zone.html
+//go:embed templates/leaderboard.html templates/status.html templates/graphs.html templates/activity.html templates/zone.html templates/heatmap.html
 var templateFS embed.FS
 
 //go:embed static/zones.html
@@ -999,11 +999,13 @@ func (e *exporter) publicMux() *http.ServeMux {
 	mux.HandleFunc("GET /api/graph", e.handleGraphData)
 	mux.HandleFunc("GET /api/activity", e.handleActivityData)
 	mux.HandleFunc("GET /api/zone-activity", e.handleZoneActivityData)
+	mux.HandleFunc("GET /api/heat", e.handleHeatData)
 	mux.HandleFunc("GET /zones", handleZoneMap)
 	mux.HandleFunc("GET /tour", handleTour)
 	mux.HandleFunc("GET /graphs", e.handleGraphs)
 	mux.HandleFunc("GET /activity", e.handleActivity)
 	mux.HandleFunc("GET /zone", e.handleZonePage)
+	mux.HandleFunc("GET /heatmap", e.handleHeatmap)
 	mux.HandleFunc("GET /status", e.handleStatus)
 	mux.HandleFunc("GET /{$}", e.handleLeaderboard)
 	return mux
@@ -1266,6 +1268,38 @@ func (e *exporter) handleActivity(w http.ResponseWriter, r *http.Request) {
 		"Players":  e.pickerPlayers(r.Context()),
 		"Defaults": strings.Join(e.cfg.Players, ","),
 	})
+}
+
+// handleHeatmap renders the takeover-heatmap page: it supplies the picker
+// names and default selection; the browser fetches counts from /api/heat.
+func (e *exporter) handleHeatmap(w http.ResponseWriter, r *http.Request) {
+	e.renderPage(w, "heatmap.html", map[string]any{
+		"Area":     e.sel.summary,
+		"Players":  e.pickerPlayers(r.Context()),
+		"Defaults": strings.Join(e.cfg.Players, ","),
+	})
+}
+
+// handleHeatData serves per-(zone, taker) takeover counts for the heatmap as
+// JSON. Public. An empty player set counts everyone; days defaults to 7.
+func (e *exporter) handleHeatData(w http.ResponseWriter, r *http.Request) {
+	days := 7
+	if v := r.URL.Query().Get("days"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			httpError(w, http.StatusBadRequest, "days must be a positive integer")
+			return
+		}
+		days = min(n, 90)
+	}
+	names := splitParams(r.URL.Query()["player"])
+	rows, err := e.store.takeoverHeat(r.Context(), names, time.Now().AddDate(0, 0, -days), 100000)
+	if err != nil {
+		e.log.Error("heat query failed", "err", err)
+		httpError(w, http.StatusInternalServerError, "query failed")
+		return
+	}
+	writeJSON(w, r, e.log, rows)
 }
 
 // handleZonePage renders the per-zone activity page. The zone name and id come

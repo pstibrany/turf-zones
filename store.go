@@ -329,6 +329,52 @@ func (s *store) takeoverCounts(ctx context.Context, since time.Time) (map[int64]
 	return out, rows.Err()
 }
 
+// heatCount is one zone's takeover count by one taker, for the activity heatmap.
+type heatCount struct {
+	Latitude  float64 `json:"lat"`
+	Longitude float64 `json:"lng"`
+	Zone      string  `json:"zone"`
+	Taker     string  `json:"taker"`
+	Count     int64   `json:"count"`
+}
+
+// takeoverHeat returns per-(zone, taker) takeover counts since a cutoff, for the
+// heatmap. Counts are by taker, so they are each player's own takeovers
+// (gains + revisits); an empty names slice counts every player. The caller
+// groups by zone to get totals, the dominant taker and a breakdown.
+func (s *store) takeoverHeat(ctx context.Context, names []string, since time.Time, limit int) ([]heatCount, error) {
+	sb := strings.Builder{}
+	sb.WriteString(`
+		SELECT latitude, longitude, zone_name, taker_name, COUNT(*) c
+		FROM takeovers
+		WHERE time >= ? AND latitude IS NOT NULL`)
+	args := []any{since.Unix()}
+	if len(names) > 0 {
+		sb.WriteString(" AND taker_name COLLATE NOCASE IN (" + placeholders(len(names)) + ")")
+		for _, n := range names {
+			args = append(args, n)
+		}
+	}
+	sb.WriteString(" GROUP BY zone_id, taker_name COLLATE NOCASE ORDER BY c DESC LIMIT ?")
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("takeover heat: %w", err)
+	}
+	defer rows.Close()
+
+	out := []heatCount{}
+	for rows.Next() {
+		var h heatCount
+		if err := rows.Scan(&h.Latitude, &h.Longitude, &h.Zone, &h.Taker, &h.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
 // takeoversForPlayers returns takeovers within [from, to] in which any of the
 // named players was either the taker or the previous owner, newest first. It is
 // the raw material for the activity page: the caller decides, per row, whether
