@@ -63,16 +63,32 @@
   .stop.done { opacity: 0.5; }
   .stop.done .name { text-decoration: line-through; }
   .stop .num {
-    flex: 0 0 auto; width: 22px; height: 22px; border-radius: 50%;
+    flex: 0 0 auto; width: 30px; height: 30px; border-radius: 50%;
     display: flex; align-items: center; justify-content: center;
-    font-size: 11px; font-weight: 700; color: #fff; background: var(--accent);
+    font-size: 12px; font-weight: 700; color: #fff; background: var(--accent);
   }
+  .stop .num.handle, .stop .body.handle { cursor: grab; }
+  .stop .handle:active { cursor: grabbing; }
   .stop.done .num { background: var(--done); }
   .stop .body { flex: 1; min-width: 0; }
   .stop .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .stop .meta { font-size: 11px; opacity: 0.65; font-variant-numeric: tabular-nums; }
-  .stop a.maps { flex: 0 0 auto; font-size: 16px; text-decoration: none; padding: 2px 4px; }
-  .stop button.rm { flex: 0 0 auto; width: auto; padding: 6px 14px; font-size: 16px; line-height: 1; opacity: 0.55; background: none; border: none; }
+  .sortable-ghost { opacity: 0.4; }
+  .sortable-chosen { background: rgba(128,128,128,0.18); }
+  .stop a.maps { flex: 0 0 auto; font-size: 20px; text-decoration: none; padding: 4px 6px; }
+  /* Clear gap so the remove button isn't mistaken for the navigate button. */
+  .stop button.rm { flex: 0 0 auto; width: auto; margin-left: 12px; padding: 6px 10px; font-size: 15px; line-height: 1; opacity: 0.5; background: none; border: none; }
+
+  .toast {
+    margin: 0 12px 8px; padding: 8px 10px; border-radius: 10px; font-size: 12.5px;
+    background: rgba(0,122,255,0.12); display: none; align-items: center; justify-content: space-between; gap: 10px;
+  }
+  .toast.show { display: flex; }
+  .toast button { background: none; border: none; color: var(--accent); font: inherit; font-weight: 600; cursor: pointer; padding: 2px 6px; }
+  .starticon {
+    width: 20px; height: 20px; display: flex; align-items: center; justify-content: center;
+    font-size: 15px; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.5));
+  }
 
   .leaflet-popup-content { font: 13px/1.45 -apple-system, sans-serif; }
   .pop-name { font-size: 15px; font-weight: 700; margin-bottom: 4px; }
@@ -108,6 +124,9 @@
       <label class="inline"><input type="checkbox" id="roundtrip" /> Return to start</label>
     </div>
     <div class="row">
+      <button id="setstart" title="Pin the start/return point to where you are now">📍 Set start here</button>
+    </div>
+    <div class="row">
       <input type="text" id="myname" placeholder="Your Turf name (for revisit stat)" autocapitalize="off" autocorrect="off" spellcheck="false" />
       <select id="mode" title="Travel mode">
         <option value="walking">Walk</option>
@@ -123,10 +142,12 @@
   <div class="status" id="status">Locating…</div>
   <div class="totals" id="totals"></div>
   <div class="stats" id="stats"></div>
+  <div class="toast" id="toast"></div>
   <div class="tourlist" id="tourlist"></div>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js"></script>
 <script>
 const API = "https://api.turfgame.com/v5/zones";
 const CPH = [55.6761, 12.5683];
@@ -155,8 +176,11 @@ const reached = new Set();       // zone ids visited
 // saved tour survives a reload before zones re-load. id -> {id,name,lat,lng,owner}
 const stopData = new Map();
 
-let myPos = null;                // {lat,lng} from geolocation
+let myPos = null;                // {lat,lng} live location (blue dot, reached-check)
 let myMarker = null;
+let startPos = null;             // fixed start/return anchor (persisted), not live
+let startMarker = null;
+let lastRemoved = null;          // {id, idx, wasReached} for undo
 let watchId = null;
 let wakeLock = null;
 
@@ -276,7 +300,60 @@ function toggleZone(id) {
   styleMarker(id);
   refresh(); saveTour();
 }
-function removeZone(id) { if (inTour.has(id)) toggleZone(id); }
+// removeZone deletes a stop but stashes it so an accidental tap on a phone can
+// be undone from the toast, rather than silently losing the zone.
+function removeZone(id) {
+  const idx = tour.indexOf(id);
+  if (idx < 0) return;
+  lastRemoved = { id, idx, wasReached: reached.has(id) };
+  inTour.delete(id); tour.splice(idx, 1); reached.delete(id);
+  styleMarker(id);
+  refresh(); saveTour();
+  showToast("Removed " + ((stopData.get(id) || {}).name || "zone"), undoRemove);
+}
+function undoRemove() {
+  if (!lastRemoved) return;
+  const { id, idx, wasReached } = lastRemoved;
+  lastRemoved = null;
+  if (inTour.has(id)) return;
+  inTour.add(id);
+  tour.splice(Math.min(idx, tour.length), 0, id);
+  if (wasReached) reached.add(id);
+  styleMarker(id);
+  refresh(); saveTour();
+  hideToast();
+}
+// Drag-to-reorder via SortableJS, dragging by the number badge (.handle). The
+// list is rebuilt on every refresh(), so we recreate the instance each time.
+let sortable = null;
+function initSortable(list) {
+  if (typeof Sortable === "undefined") return;
+  if (sortable) { sortable.destroy(); sortable = null; }
+  sortable = Sortable.create(list, {
+    handle: ".handle", animation: 150, forceFallback: true, fallbackTolerance: 4,
+    // On touch, hold briefly to start dragging so a quick swipe still scrolls
+    // the list; on desktop (mouse) dragging starts immediately.
+    delay: 180, delayOnTouchOnly: true,
+    onEnd: (e) => {
+      if (e.oldIndex == null || e.newIndex == null || e.oldIndex === e.newIndex) return;
+      const [moved] = tour.splice(e.oldIndex, 1);
+      tour.splice(e.newIndex, 0, moved);
+      refresh(); saveTour();
+    },
+  });
+}
+
+let toastTimer = null;
+function showToast(msg, onUndo) {
+  const t = document.getElementById("toast");
+  t.innerHTML = "";
+  const span = document.createElement("span"); span.textContent = msg; t.appendChild(span);
+  const btn = document.createElement("button"); btn.textContent = "Undo"; btn.onclick = onUndo; t.appendChild(btn);
+  t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(hideToast, 6000);
+}
+function hideToast() { document.getElementById("toast").classList.remove("show"); }
 function clearTour() {
   const ids = tour.slice();
   tour = []; inTour.clear(); reached.clear(); stopData.clear();
@@ -304,6 +381,7 @@ function saveTour() {
       fromme: document.getElementById("fromme").checked,
       mode: document.getElementById("mode").value,
       myName: document.getElementById("myname").value,
+      startPos: startPos,
     }));
   } catch (e) { /* storage full or unavailable — non-fatal */ }
 }
@@ -319,6 +397,7 @@ function loadTour() {
   if (s.fromme === false) document.getElementById("fromme").checked = false;
   if (s.mode) document.getElementById("mode").value = s.mode;
   if (typeof s.myName === "string") document.getElementById("myname").value = s.myName;
+  if (s.startPos && typeof s.startPos.lat === "number") startPos = s.startPos;
 }
 
 // Order the tour: nearest-neighbour from the start, then 2-opt clean-up. The
@@ -375,8 +454,23 @@ function twoOpt(order, start, returnTo) {
   return best;
 }
 
+// startPoint is the fixed start/return anchor — the position captured when you
+// began (or last tapped "Set start here"), NOT your live location, so a round
+// trip returns to where you started rather than chasing you around.
 function startPoint() {
-  return (document.getElementById("fromme").checked && myPos) ? myPos : null;
+  return (document.getElementById("fromme").checked && startPos) ? startPos : null;
+}
+// Pin the start to the current location the first time we have a fix (so a
+// fresh session anchors at wherever you open the page), or on demand.
+function captureStartIfNeeded() {
+  if (document.getElementById("fromme").checked && !startPos && myPos) { startPos = { lat: myPos.lat, lng: myPos.lng }; saveTour(); }
+}
+function setStartHere() {
+  if (!myPos) { setStatus("Waiting for your location…"); refreshLocation(); return; }
+  startPos = { lat: myPos.lat, lng: myPos.lng };
+  if (!document.getElementById("fromme").checked) document.getElementById("fromme").checked = true;
+  refresh(); saveTour();
+  setStatus("Start pinned to your current location.");
 }
 
 // ---------- render tour list, route line, numbers, totals ----------
@@ -394,6 +488,12 @@ function refresh() {
   if (rt && remainingIds.length) closeTo = start || coordOf(remainingIds[0]);
   if (closeTo) pts.push([closeTo.lat, closeTo.lng]);
   routeLine.setLatLngs(pts);
+
+  // Fixed start/return marker (🏁), distinct from the live blue dot.
+  if (start) {
+    if (!startMarker) startMarker = L.marker([start.lat, start.lng], { icon: L.divIcon({ className: "", html: '<div class="starticon">🏁</div>', iconSize: [20, 20], iconAnchor: [10, 10] }), interactive: false, zIndexOffset: 900 }).addTo(map);
+    else startMarker.setLatLng([start.lat, start.lng]);
+  } else if (startMarker) { map.removeLayer(startMarker); startMarker = null; }
 
   // Numbered markers over the tour zones.
   numLayer.clearLayers();
@@ -430,8 +530,8 @@ function refresh() {
     const row = document.createElement("div");
     row.className = "stop" + (done ? " done" : "");
     row.innerHTML =
-      `<span class="num">${done ? "✓" : idx+1}</span>` +
-      `<div class="body"><div class="name">${esc(st.name)}</div>` +
+      `<span class="num handle" title="Drag to reorder">${done ? "✓" : idx+1}</span>` +
+      `<div class="body handle"><div class="name">${esc(st.name)}</div>` +
       `<div class="meta">${done ? "reached" : (leg != null ? fmtDist(leg) + " from previous" : "start point")}</div></div>` +
       `<a class="maps" title="Directions in Apple Maps" target="_blank" href="https://maps.apple.com/?daddr=${st.lat},${st.lng}&dirflg=${appleDirflg()}">🗺️</a>` +
       `<button class="rm" title="Remove">✕</button>`;
@@ -439,6 +539,7 @@ function refresh() {
     row.querySelector(".name").onclick = () => map.panTo([st.lat, st.lng]);
     list.appendChild(row);
   });
+  initSortable(list);
 
   const rr = document.getElementById("removereached");
   if (rr) rr.disabled = reached.size === 0;
@@ -495,6 +596,7 @@ function onPosition(p) {
   myPos = { lat: p.coords.latitude, lng: p.coords.longitude };
   if (!myMarker) myMarker = L.marker([myPos.lat, myPos.lng], { icon: L.divIcon({ className: "", html: '<div class="meicon"></div>', iconSize: [16,16], iconAnchor: [8,8] }), zIndexOffset: 1000 }).addTo(map);
   else myMarker.setLatLng([myPos.lat, myPos.lng]);
+  captureStartIfNeeded();   // pin the start on the first fix (fixed, not live)
 
   // Mark any not-yet-reached tour zone we are now standing on.
   let changed = false;
@@ -524,7 +626,8 @@ document.getElementById("optimize").onclick = optimize;
 document.getElementById("clear").onclick = clearTour;
 document.getElementById("removereached").onclick = removeReached;
 document.getElementById("live").onclick = toggleLive;
-document.getElementById("fromme").onchange = () => { refresh(); saveTour(); };
+document.getElementById("setstart").onclick = setStartHere;
+document.getElementById("fromme").onchange = () => { captureStartIfNeeded(); refresh(); saveTour(); };
 document.getElementById("roundtrip").onchange = () => { refresh(); saveTour(); };
 document.getElementById("mode").onchange = () => { refresh(); saveTour(); }; // per-stop Apple links + saved mode
 document.getElementById("myname").oninput = () => { refresh(); saveTour(); };
@@ -537,7 +640,7 @@ map.on("moveend", () => { clearTimeout(moveTimer); moveTimer = setTimeout(loadZo
 loadTour();   // restore a saved trip before first render
 if (navigator.geolocation) {
   navigator.geolocation.getCurrentPosition(
-    p => { myPos = { lat: p.coords.latitude, lng: p.coords.longitude }; map.setView([myPos.lat, myPos.lng], 15); refresh(); },
+    p => { myPos = { lat: p.coords.latitude, lng: p.coords.longitude }; captureStartIfNeeded(); map.setView([myPos.lat, myPos.lng], 15); refresh(); },
     () => loadZones(),
     { enableHighAccuracy: true, timeout: 10000 }
   );
