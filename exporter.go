@@ -38,7 +38,7 @@ const feedCursorKey = "feed.takeover.cursor"
 // and rendered, static/ is served verbatim — the zone map is a self-contained
 // page of HTML and JavaScript that would only be mangled by a template parser.
 //
-//go:embed templates/leaderboard.html templates/status.html templates/graphs.html templates/activity.html templates/zone.html templates/heatmap.html
+//go:embed templates/leaderboard.html templates/status.html templates/graphs.html templates/activity.html templates/zone.html templates/heatmap.html templates/daymap.html
 var templateFS embed.FS
 
 //go:embed static/zones.html
@@ -1006,6 +1006,7 @@ func (e *exporter) publicMux() *http.ServeMux {
 	mux.HandleFunc("GET /activity", e.handleActivity)
 	mux.HandleFunc("GET /zone", e.handleZonePage)
 	mux.HandleFunc("GET /heatmap", e.handleHeatmap)
+	mux.HandleFunc("GET /daymap", e.handleDayMap)
 	mux.HandleFunc("GET /status", e.handleStatus)
 	mux.HandleFunc("GET /{$}", e.handleLeaderboard)
 	return mux
@@ -1270,6 +1271,17 @@ func (e *exporter) handleActivity(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleDayMap renders the day-map page: it plots one day's gains/losses for
+// the selected players. Players/from/to come from the query (the /activity day
+// headers link here); the browser fetches events from /api/activity.
+func (e *exporter) handleDayMap(w http.ResponseWriter, r *http.Request) {
+	e.renderPage(w, "daymap.html", map[string]any{
+		"Area":     e.sel.summary,
+		"Players":  e.pickerPlayers(r.Context()),
+		"Defaults": strings.Join(e.cfg.Players, ","),
+	})
+}
+
 // handleHeatmap renders the takeover-heatmap page: it supplies the picker
 // names and default selection; the browser fetches counts from /api/heat.
 func (e *exporter) handleHeatmap(w http.ResponseWriter, r *http.Request) {
@@ -1396,6 +1408,27 @@ func (e *exporter) handleActivityData(w http.ResponseWriter, r *http.Request) {
 		limit = min(n, 100000)
 	}
 
+	// Time window: an explicit from/to (any of RFC3339, Unix seconds, or a
+	// relative duration) wins over the days shorthand — used to scope to one
+	// specific day for the day map.
+	from, to := now.AddDate(0, 0, -days), now
+	if v := r.URL.Query().Get("from"); v != "" {
+		t, err := parseTimeParam(v, now)
+		if err != nil {
+			httpError(w, http.StatusBadRequest, "from: %v", err)
+			return
+		}
+		from = t
+	}
+	if v := r.URL.Query().Get("to"); v != "" {
+		t, err := parseTimeParam(v, now)
+		if err != nil {
+			httpError(w, http.StatusBadRequest, "to: %v", err)
+			return
+		}
+		to = t
+	}
+
 	names := splitParams(r.URL.Query()["player"])
 	if len(names) == 0 {
 		writeJSON(w, r, e.log, []activityEvent{})
@@ -1409,7 +1442,7 @@ func (e *exporter) handleActivityData(w http.ResponseWriter, r *http.Request) {
 		want[strings.ToLower(n)] = true
 	}
 
-	rows, err := e.store.takeoversForPlayers(r.Context(), names, now.AddDate(0, 0, -days), now, limit)
+	rows, err := e.store.takeoversForPlayers(r.Context(), names, from, to, limit)
 	if err != nil {
 		e.log.Error("activity query failed", "err", err)
 		httpError(w, http.StatusInternalServerError, "query failed")

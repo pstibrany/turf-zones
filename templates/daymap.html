@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>Turf — day map</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+  :root { color-scheme: light dark; --accent: #007aff; --gain: #34c759; --loss: #ff3b30; --revisit: #8a8f98; }
+  html, body { margin: 0; height: 100%; font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  #map { position: absolute; inset: 0; }
+  .panel {
+    position: absolute; top: 10px; left: 10px; z-index: 1000;
+    width: 330px; max-width: calc(100% - 20px); background: rgba(255,255,255,0.96);
+    border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.25); padding: 10px 12px;
+    transition: transform 0.2s ease, opacity 0.2s ease;
+  }
+  .panel.hidden { transform: translateX(calc(-100% - 20px)); opacity: 0; pointer-events: none; }
+  @media (prefers-color-scheme: dark) { .panel { background: rgba(30,30,34,0.96); color: #eee; } }
+  #toggle {
+    position: absolute; top: 10px; left: 10px; z-index: 1001;
+    width: 40px; height: 40px; padding: 0; border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px; cursor: pointer; background: rgba(255,255,255,0.95); color: inherit;
+    border: 1px solid rgba(128,128,128,0.4); box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+  }
+  @media (prefers-color-scheme: dark) { #toggle { background: rgba(30,30,34,0.95); color: #eee; } }
+  .panel h1 { font-size: 15px; margin: 0 0 6px; padding-left: 34px; }
+  .row { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
+  input, select, button {
+    font: inherit; padding: 6px 8px; border-radius: 8px; border: 1px solid rgba(128,128,128,0.4);
+    background: rgba(128,128,128,0.08); color: inherit;
+  }
+  input[type=text] { flex: 1 1 auto; min-width: 0; }
+  input[type=date] { flex: 1 1 auto; min-width: 0; }
+  select#preset { flex: 1 1 auto; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  .arrow { opacity: 0.5; flex: 0 0 auto; }
+  .sub { font-size: 11.5px; opacity: 0.75; }
+  .sub a { color: var(--accent); text-decoration: none; }
+  .legend { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; align-items: center; }
+  .legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .legend i { width: 11px; height: 11px; border-radius: 50%; display: inline-block; border: 1.5px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,0.25); }
+  .leaflet-popup-content { font: 13px/1.45 -apple-system, sans-serif; }
+  .pop-name { font-size: 15px; font-weight: 700; margin-bottom: 2px; }
+  .pop-name a { color: inherit; text-decoration: none; }
+  .pop-meta { opacity: 0.75; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<button id="toggle" title="Show/hide panel">☰</button>
+<div class="panel">
+  <h1>Day map</h1>
+  <div class="row">
+    <input type="text" id="names" list="known" placeholder="Players (comma-separated)"
+           autocapitalize="off" autocorrect="off" spellcheck="false" />
+    <select id="add">
+      <option value="">Add…</option>
+      {{ range .Players }}<option value="{{ . }}">{{ . }}</option>{{ end }}
+    </select>
+  </div>
+  <datalist id="known">
+    {{ range .Players }}<option value="{{ . }}"></option>{{ end }}
+  </datalist>
+  <div class="row">
+    <input type="date" id="from" />
+    <span class="arrow">→</span>
+    <input type="date" id="to" />
+  </div>
+  <div class="row">
+    <select id="preset" title="Quick range">
+      <option value="custom">Custom range</option>
+      <option value="1">Last 1 day</option>
+      <option value="2">Last 2 days</option>
+      <option value="3">Last 3 days</option>
+      <option value="5">Last 5 days</option>
+      <option value="7">Last 7 days</option>
+      <option value="14">Last 14 days</option>
+      <option value="30">Last 30 days</option>
+    </select>
+    <button id="show" class="primary">Show</button>
+  </div>
+  <div class="sub" id="sub">{{ .Area }}</div>
+  <div class="legend">
+    <span><i style="background:var(--gain)"></i>gained</span>
+    <span><i style="background:var(--loss)"></i>lost</span>
+    <span><i style="background:var(--revisit)"></i>revisit</span>
+    <span class="sub"><a href="/activity" id="back">← Activity</a></span>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const CPH = [55.6761, 12.5683];
+const map = L.map("map", { zoomControl: false }).setView(CPH, 12);
+L.control.zoom({ position: "bottomright" }).addTo(map);
+L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
+  attribution: '© OpenStreetMap © CARTO · zones © Turf', maxZoom: 20, subdomains: "abcd"
+}).addTo(map);
+const layer = L.layerGroup().addTo(map);
+const COLOR = { gained: "#34c759", lost: "#ff3b30", revisit: "#8a8f98" };
+
+function esc(s) { return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+function fmtTime(iso) { return new Date(iso).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }); }
+function parseNames(s) { return s.split(",").map((x) => x.trim()).filter(Boolean); }
+function ymd(d) { const p = (n) => String(n).padStart(2, "0"); return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()); }
+
+const namesInput = document.getElementById("names");
+const addSelect = document.getElementById("add");
+const presetSel = document.getElementById("preset");
+const fromInput = document.getElementById("from");
+const toInput = document.getElementById("to");
+let firstFit = true;
+
+document.getElementById("toggle").onclick = () => document.querySelector(".panel").classList.toggle("hidden");
+document.getElementById("show").onclick = load;
+namesInput.addEventListener("keydown", (e) => { if (e.key === "Enter") load(); });
+addSelect.addEventListener("change", () => {
+  const v = addSelect.value; addSelect.value = "";
+  if (!v) return;
+  const cur = parseNames(namesInput.value);
+  if (!cur.some((n) => n.toLowerCase() === v.toLowerCase())) { cur.push(v); namesInput.value = cur.join(", "); }
+  load();
+});
+// Preset fills the date fields; editing dates flips the preset to "Custom".
+presetSel.addEventListener("change", () => {
+  if (presetSel.value !== "custom") applyPreset(parseInt(presetSel.value, 10));
+  load();
+});
+fromInput.addEventListener("change", () => { presetSel.value = "custom"; load(); });
+toInput.addEventListener("change", () => { presetSel.value = "custom"; load(); });
+
+function applyPreset(days) {
+  const today = new Date();
+  const start = new Date(today.getFullYear(), today.getMonth(), today.getDate() - (days - 1));
+  fromInput.value = ymd(start);
+  toInput.value = ymd(today);
+}
+
+// The window is [from 00:00, to+1 00:00) in local time, as Unix seconds.
+function windowFromInputs() {
+  if (!fromInput.value || !toInput.value) applyPreset(7);
+  const [fy, fm, fd] = fromInput.value.split("-").map(Number);
+  const [ty, tm, td] = toInput.value.split("-").map(Number);
+  let from = Math.floor(new Date(fy, fm - 1, fd).getTime() / 1000);
+  let to = Math.floor(new Date(ty, tm - 1, td + 1).getTime() / 1000);
+  if (to < from) [from, to] = [to, from];
+  return { from, to };
+}
+
+function syncURL(names, win) {
+  const u = new URL(window.location);
+  if (names.length) u.searchParams.set("players", names.join(",")); else u.searchParams.delete("players");
+  u.searchParams.set("from", win.from);
+  u.searchParams.set("to", win.to);
+  u.searchParams.delete("days"); u.searchParams.delete("label");
+  history.replaceState(null, "", u);
+}
+
+async function load() {
+  const names = parseNames(namesInput.value);
+  const win = windowFromInputs();
+  syncURL(names, win);
+  document.getElementById("back").href = names.length ? "/activity?players=" + encodeURIComponent(names.join(",")) : "/activity";
+  if (!names.length) { document.getElementById("sub").textContent = "Enter one or more players."; layer.clearLayers(); return; }
+
+  const q = names.map((n) => "player=" + encodeURIComponent(n)).join("&") +
+    "&from=" + win.from + "&to=" + win.to + "&limit=5000";
+  let events = [];
+  try {
+    const resp = await fetch("/api/activity?" + q);
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    events = await resp.json();
+  } catch (err) { document.getElementById("sub").textContent = "Failed to load: " + err.message; return; }
+  render(events, names);
+}
+
+function render(events, names) {
+  layer.clearLayers();
+  let gained = 0, lost = 0, revisit = 0;
+  const bounds = [];
+  for (const e of events) {
+    if (e.action === "gained") gained++; else if (e.action === "lost") lost++; else revisit++;
+    if (!e.lat && !e.lng) continue;
+    const m = L.circleMarker([e.lat, e.lng], {
+      radius: 7, weight: 2, color: "#fff", fillColor: COLOR[e.action] || "#8a8f98", fillOpacity: 0.9,
+    });
+    const opp = e.opponent ? (e.action === "gained" ? " from " : " to ") + esc(e.opponent) : "";
+    m.bindTooltip(`${esc(e.zone)} · ${fmtTime(e.time)}`, { direction: "top" });
+    m.bindPopup(
+      `<div class="pop-name"><a href="https://turfgame.com/zone/${encodeURIComponent(e.zone)}" target="_blank">${esc(e.zone)}</a></div>` +
+      `<div class="pop-meta">${e.action}${opp} · ${fmtTime(e.time)}${e.points ? " · +" + e.points : ""}</div>` +
+      `<div class="pop-meta">${esc(e.player)}</div>`);
+    m.addTo(layer);
+    bounds.push([e.lat, e.lng]);
+  }
+  document.getElementById("sub").innerHTML =
+    `${names.map(esc).join(", ")} · <b style="color:var(--gain)">${gained}</b> gained · ` +
+    `<b style="color:var(--loss)">${lost}</b> lost` + (revisit ? ` · ${revisit} revisit` : "");
+  if (firstFit && bounds.length) { map.fitBounds(bounds, { padding: [50, 50], maxZoom: 15 }); firstFit = false; }
+}
+
+// Initial state from the URL: players, and either an explicit from/to (Unix
+// seconds — e.g. an Activity day link) mapped onto the date pickers, or the
+// default last-7-days preset.
+(function init() {
+  const params = new URL(window.location).searchParams;
+  const p = params.get("players");
+  namesInput.value = p !== null ? p : {{ .Defaults }};
+  const from = params.get("from"), to = params.get("to");
+  if (from && to) {
+    fromInput.value = ymd(new Date(+from * 1000));
+    toInput.value = ymd(new Date((+to - 1) * 1000)); // 'to' is the exclusive next midnight
+    presetSel.value = "custom";
+  } else {
+    presetSel.value = "7";
+    applyPreset(7);
+  }
+  load();
+})();
+</script>
+</body>
+</html>
