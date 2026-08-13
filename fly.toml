@@ -11,7 +11,7 @@ primary_region = "arn"
   TURF_TURF_REGIONS = "172"
   TURF_LOG_FORMAT = "json"
   # Always tracked, whether or not they make the top list.
-  TURF_PLAYERS = "hula,Alanda"
+  TURF_PLAYERS = "hula,Alanda,Kalileko,alucia"
 
 # TURF_API_TOKEN guards /api/* and is deliberately NOT set here: this file is
 # committed, and a secret in git stays in git. Set it out of band, which also
