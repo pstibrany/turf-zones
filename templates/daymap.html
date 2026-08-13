@@ -203,8 +203,8 @@ function render(events, names) {
     const m = L.circleMarker([z.lat, z.lng], {
       radius: 7, weight: 2, color: "#fff", fillColor: COLOR[latest.action] || "#8a8f98", fillOpacity: 0.9,
     });
-    const extra = z.events.length > 1 ? ` (+${z.events.length - 1})` : "";
-    m.bindTooltip(`${esc(z.zone)} · ${latest.action} ${fmtTime(latest.time)}${extra}`, { direction: "top" });
+    const extra = z.events.length > 1 ? ` · ${z.events.length} events` : "";
+    m.bindTooltip(`${esc(z.zone)}${extra}`, { direction: "top" });
     const rows = z.events.map((e) => {
       const opp = e.opponent ? (e.action === "gained" ? " from " : " to ") + esc(e.opponent) : "";
       const who = multi ? " · " + esc(e.player) : "";
