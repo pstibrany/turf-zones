@@ -104,6 +104,7 @@ const COLOR = { gained: "#34c759", lost: "#ff3b30", revisit: "#8a8f98" };
 
 function esc(s) { return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 function fmtTime(iso) { return new Date(iso).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }); }
+function fmtDateTime(iso) { return new Date(iso).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }); }
 function parseNames(s) { return s.split(",").map((x) => x.trim()).filter(Boolean); }
 function ymd(d) { const p = (n) => String(n).padStart(2, "0"); return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()); }
 
@@ -191,7 +192,7 @@ function render(events, names) {
     m.bindTooltip(`${esc(e.zone)} · ${fmtTime(e.time)}`, { direction: "top" });
     m.bindPopup(
       `<div class="pop-name"><a href="https://turfgame.com/zone/${encodeURIComponent(e.zone)}" target="_blank">${esc(e.zone)}</a></div>` +
-      `<div class="pop-meta">${e.action}${opp} · ${fmtTime(e.time)}${e.points ? " · +" + e.points : ""}</div>` +
+      `<div class="pop-meta">${e.action}${opp} · ${fmtDateTime(e.time)}${e.points ? " · +" + e.points : ""}</div>` +
       `<div class="pop-meta">${esc(e.player)}</div>`);
     m.addTo(layer);
     bounds.push([e.lat, e.lng]);
