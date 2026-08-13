@@ -199,9 +199,12 @@ function render(events, names) {
 
   const bounds = [];
   for (const z of zones.values()) {
-    const latest = z.events[0];
+    // Colour by the most recent ownership-changing event (gained/lost); revisits
+    // don't change ownership, so they only decide the colour when a zone has
+    // nothing but revisits in the window.
+    const decisive = z.events.find((e) => e.action !== "revisit") || z.events[0];
     const m = L.circleMarker([z.lat, z.lng], {
-      radius: 7, weight: 2, color: "#fff", fillColor: COLOR[latest.action] || "#8a8f98", fillOpacity: 0.9,
+      radius: 7, weight: 2, color: "#fff", fillColor: COLOR[decisive.action] || "#8a8f98", fillOpacity: 0.9,
     });
     const extra = z.events.length > 1 ? ` · ${z.events.length} events` : "";
     m.bindTooltip(`${esc(z.zone)}${extra}`, { direction: "top" });
