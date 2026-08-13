@@ -181,22 +181,40 @@ async function load() {
 function render(events, names) {
   layer.clearLayers();
   let gained = 0, lost = 0, revisit = 0;
-  const bounds = [];
+
+  // Group by zone so a zone that was lost and later regained in the window is a
+  // single marker (events overlapping at one point would otherwise hide each
+  // other). /api/activity is newest-first, so events[0] is the latest and its
+  // action decides the marker colour — i.e. your current standing on that zone.
+  const zones = new Map();
+  const multi = names.length > 1;
   for (const e of events) {
     if (e.action === "gained") gained++; else if (e.action === "lost") lost++; else revisit++;
     if (!e.lat && !e.lng) continue;
-    const m = L.circleMarker([e.lat, e.lng], {
-      radius: 7, weight: 2, color: "#fff", fillColor: COLOR[e.action] || "#8a8f98", fillOpacity: 0.9,
-    });
-    const opp = e.opponent ? (e.action === "gained" ? " from " : " to ") + esc(e.opponent) : "";
-    m.bindTooltip(`${esc(e.zone)} · ${fmtTime(e.time)}`, { direction: "top" });
-    m.bindPopup(
-      `<div class="pop-name"><a href="https://turfgame.com/zone/${encodeURIComponent(e.zone)}" target="_blank">${esc(e.zone)}</a></div>` +
-      `<div class="pop-meta">${e.action}${opp} · ${fmtDateTime(e.time)}${e.points ? " · +" + e.points : ""}</div>` +
-      `<div class="pop-meta">${esc(e.player)}</div>`);
-    m.addTo(layer);
-    bounds.push([e.lat, e.lng]);
+    const key = e.zone_id || (e.zone + "@" + e.lat + "," + e.lng);
+    let z = zones.get(key);
+    if (!z) { z = { lat: e.lat, lng: e.lng, zone: e.zone, events: [] }; zones.set(key, z); }
+    z.events.push(e);
   }
+
+  const bounds = [];
+  for (const z of zones.values()) {
+    const latest = z.events[0];
+    const m = L.circleMarker([z.lat, z.lng], {
+      radius: 7, weight: 2, color: "#fff", fillColor: COLOR[latest.action] || "#8a8f98", fillOpacity: 0.9,
+    });
+    const extra = z.events.length > 1 ? ` (+${z.events.length - 1})` : "";
+    m.bindTooltip(`${esc(z.zone)} · ${latest.action} ${fmtTime(latest.time)}${extra}`, { direction: "top" });
+    const rows = z.events.map((e) => {
+      const opp = e.opponent ? (e.action === "gained" ? " from " : " to ") + esc(e.opponent) : "";
+      const who = multi ? " · " + esc(e.player) : "";
+      return `<div class="pop-meta"><span style="color:${COLOR[e.action]}">${e.action}</span>${opp} · ${fmtDateTime(e.time)}${e.points ? " · +" + e.points : ""}${who}</div>`;
+    }).join("");
+    m.bindPopup(`<div class="pop-name"><a href="https://turfgame.com/zone/${encodeURIComponent(z.zone)}" target="_blank">${esc(z.zone)}</a></div>` + rows);
+    m.addTo(layer);
+    bounds.push([z.lat, z.lng]);
+  }
+
   document.getElementById("sub").innerHTML =
     `${names.map(esc).join(", ")} · <b style="color:var(--gain)">${gained}</b> gained · ` +
     `<b style="color:var(--loss)">${lost}</b> lost` + (revisit ? ` · ${revisit} revisit` : "");
