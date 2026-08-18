@@ -162,7 +162,7 @@ L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r
 
 const zoneLayer = L.layerGroup().addTo(map);
 const numLayer = L.layerGroup().addTo(map);
-const routeLine = L.polyline([], { color: "#007aff", weight: 4, opacity: 0.7, dashArray: "1 8", lineCap: "round" }).addTo(map);
+const routeLine = L.polyline([], { color: "#007aff", weight: 4, opacity: 0.7, dashArray: "1 8", lineCap: "round", interactive: false }).addTo(map);
 
 const zonesById = new Map();     // id -> zone (accumulated across loads)
 const markerById = new Map();    // id -> circleMarker
@@ -606,7 +606,7 @@ function stopLive() {
 }
 function onPosition(p) {
   myPos = { lat: p.coords.latitude, lng: p.coords.longitude };
-  if (!myMarker) myMarker = L.marker([myPos.lat, myPos.lng], { icon: L.divIcon({ className: "", html: '<div class="meicon"></div>', iconSize: [16,16], iconAnchor: [8,8] }), zIndexOffset: 1000 }).addTo(map);
+  if (!myMarker) myMarker = L.marker([myPos.lat, myPos.lng], { icon: L.divIcon({ className: "", html: '<div class="meicon"></div>', iconSize: [16,16], iconAnchor: [8,8] }), zIndexOffset: 1000, interactive: false }).addTo(map);
   else myMarker.setLatLng([myPos.lat, myPos.lng]);
   captureStartIfNeeded();   // pin the start on the first fix (fixed, not live)
 
