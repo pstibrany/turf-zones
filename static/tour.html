@@ -473,16 +473,28 @@ function setStartHere() {
   setStatus("Start pinned to your current location.");
 }
 
+// The coordinate of the last reached zone in tour order (where you left off).
+function lastReachedCoord() {
+  for (let i = tour.length - 1; i >= 0; i--) if (reached.has(tour[i])) return coordOf(tour[i]);
+  return null;
+}
+
 // ---------- render tour list, route line, numbers, totals ----------
 function refresh() {
   // Remaining (unreached) zones drive the route line, numbering and stats.
   const remainingIds = tour.filter(id => !reached.has(id));
-  const start = startPoint();
+  const start = startPoint();          // fixed home: start marker + round-trip return
   const rt = roundTrip();
 
-  // Route line: start (if any) → remaining zones → back to start (round trip).
+  // Origin of the remaining route. Once underway (some zones reached), measure
+  // from where you are now (or the last reached zone) so "distance to next"
+  // reflects progress instead of always starting from home. Round trips still
+  // return to home.
+  let origin = start;
+  if (reached.size > 0) origin = myPos || lastReachedCoord() || start;
+
   const pts = [];
-  if (start) pts.push([start.lat, start.lng]);
+  if (origin) pts.push([origin.lat, origin.lng]);
   for (const id of remainingIds) { const c = coordOf(id); pts.push([c.lat, c.lng]); }
   let closeTo = null;
   if (rt && remainingIds.length) closeTo = start || coordOf(remainingIds[0]);
@@ -505,7 +517,7 @@ function refresh() {
 
   // Per-leg distances and total, along the remaining route from the start.
   const legs = [];
-  let prev = start, total = 0;
+  let prev = origin, total = 0;
   for (const id of remainingIds) { const c = coordOf(id); const d = prev ? haversine(prev, c) : null; if (d != null) total += d; legs.push(d); prev = c; }
   if (rt && prev && closeTo) total += haversine(prev, closeTo);
 
